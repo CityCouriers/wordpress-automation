@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { safeEnv } = require('./safe-env.js');
-const { assertIsolatedSync } = require('./isolation-probe.js');
+const { refuseStart } = require('./isolation-guard.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = path.join(ROOT, 'reports', 'mutation');
@@ -22,7 +22,7 @@ if (!/^[A-Za-z0-9]+\.gs$/.test(name || '')) {
   console.error('Podaj nazwę pliku z src/, np. WordPress.gs');
   process.exit(2);
 }
-assertIsolatedSync(); // fail-closed: bez potwierdzonej izolacji żaden mutant nie wystartuje
+refuseStart('run-file.js'); // no-go-izolacja: w tej gałęzi mutanty nie startują (zob. isolation-guard.js)
 const concurrency = arg('concurrency') || '4';
 const limit = Number(arg('limit') || 0);
 const stem = name.replace(/\.gs$/, '');

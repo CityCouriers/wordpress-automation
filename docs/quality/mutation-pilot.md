@@ -3,8 +3,9 @@
 Status: **`no-go-izolacja` dla dalszego wykonywania w tym środowisku** (audyt #238 z 2026-11-02 i 2026-11-05; Refs #234).
 Przebieg z 2026-11-02 odbył się bez izolacji systemowej wymaganej w #234, więc jego liczby są **wyłącznie
 diagnostyką techniczną** i nie potwierdzają spełnienia kryterium izolacji. Dalsze przebiegi tylko w
-zweryfikowanej izolacji (odcięta sieć, bez sekretów, bez `GIT_*`), czyli w CI na Linuksie (#253), po
-sondach odmowy; narzędzia same odmawiają startu bez nich (sekcja „Izolacja”). Pilot na osobnej gałęzi, bez bramki i bez CI. Zmiany `package.json`,
+środowisku z **wymuszoną izolacją całego drzewa procesów**, której dowód (kontener bez sieci, ograniczony
+mount i UID, jawna polityka systemu plików) jest przedmiotem #253; w tej gałęzi narzędzia uruchamiające
+Stryker w ogóle nie startują (sekcja „Izolacja”). Pilot na osobnej gałęzi, bez bramki i bez CI. Zmiany `package.json`,
 `package-lock.json` i konfiguracji nie są przeznaczone do scalenia do `main`. Nic tu nie jest
 wymogiem dla PR-ów. Pełne listy linii: [mutation-pilot-listy.md](mutation-pilot-listy.md).
 
@@ -69,7 +70,7 @@ npm run test:coverage                            # LCOV potrzebny dla report.js
 
 Jedna funkcja: `npx stryker run --mutate ".stryker-shadow/WordPress.js:1563-1627" --commandRunner.command "node scripts/mutation/run-tests.js test/wordpress-commands.test.js"`
 po `npm run mutation:prepare -- WordPress.gs`. `classify.js` dzieli zabite na `killed-assert` i `killed-other`.
-`run-file.js` i `validate-selection.js` zaczynają od sond izolacji i bez ich przejścia nie startują; cały łańcuch procesów dostaje minimalne środowisko (`safe-env.js`).
+`run-file.js` i `validate-selection.js` w tej gałęzi **odmawiają startu** (`isolation-guard.js`, kod 3); cały łańcuch procesów dostaje minimalne środowisko (`safe-env.js`).
 
 ## Wyniki per plik
 
@@ -191,21 +192,42 @@ Skutki:
 - liczby z tego dokumentu zachowano jako diagnostykę techniczną; nie są dowodem spełnienia AC izolacji
   i nie uzasadniają integracji z CI ani Ready/merge tego PR-a,
 - **dalsze przebiegi w tym środowisku są wstrzymane**; nie uruchomiono ich po audycie,
-- narzędzia wymuszają to mechanicznie: `run-file.js` i `validate-selection.js` zaczynają od
-  `isolation-probe.js` (sieć: połączenia z publicznymi adresami muszą się nie udać; zapis poza katalogiem
-  przebiegu i odczyt konfiguracji użytkownika muszą się nie udać; brak poświadczeń, `GIT_*` i `.clasp*`)
-  i przy jakiejkolwiek porażce kończą się kodem 3 bez startu Strykera, bez flagi to wyłączającej.
-  Na maszynie roboczej, na której zrobiono pilot, sonda daje: sieć osiągalna (1.1.1.1:443, 8.8.8.8:53),
-  zapis w katalogu nadrzędnym możliwy, odczyt `.gitconfig` możliwy, 43 zmienne z poświadczeniami lub
-  `GIT_*` w otoczeniu; `run-file.js` kończy się kodem 3 i nie tworzy `.stryker-tmp`,
+- narzędzia w tej gałęzi **nie startują mutantów**: `run-file.js` i `validate-selection.js` zaczynają od
+  `isolation-guard.js` i zawsze kończą się kodem 3 z komunikatem `no-go-izolacja`, zanim powstanie
+  `.stryker-tmp`, kopia cienia czy raport. Nie ma flagi, pliku ani zmiennej środowiskowej, które by to
+  zdejmowały, bo każdą deklarację izolacji da się sfałszować (testy sprawdzają to z fałszywymi
+  `MUTATION_ISOLATED=1`, `CI=true` itp.),
+- `isolation-probe.js` jest **wyłącznie diagnostyką wykrywania ekspozycji**, nie dowodem izolacji i nie
+  upoważnieniem do startu: sprawdza skończoną listę próbek (dwa adresy IP, katalog nadrzędny, cztery pliki
+  użytkownika, zmienne z poświadczeniami i `GIT_*`, `.clasp*`), więc „nic nie wykryto” nie znaczy „odcięto”
+  (zablokowane dwa adresy nie dowodzą braku sieci; brak czterech plików nie dowodzi braku dostępu do reszty
+  dysku). Dlatego jej kod wyjścia **nigdy nie wynosi 0**: 3 = wykryto ekspozycję, 4 = nic nie wykryto
+  („to NIE jest dowód izolacji”). Poprzednia wersja, która przy braku wykrytej ekspozycji kończyła się 0
+  i pisała „izolacja potwierdzona”, zawierała fałszywą zieloną gwarancję (audyt z 2026-11-07) i została usunięta,
 - całe drzewo procesów dostaje minimalne środowisko z allowlisty (`safe-env.js`: `PATH`, `SystemRoot`,
-  `TEMP` itp. i dwie zmienne pilota; wszystko inne, w tym każde `GIT_*`, jest odrzucane; test:
-  `node --test scripts/mutation/safe-env.test.js`). Dotyczy to Strykera, loadera i testów; wcześniej filtr
-  po wzorcu działał tylko w procesie testów,
-- kolejna próba: zweryfikowane środowisko z odciętą siecią (kontener z `--network none` albo
-  `unshare -n`), katalogiem tylko do zapisu w kopii i bez sekretów, na Linuksie w CI zgodnie z #253;
-  sonda musi tam przejść, zanim ruszy pierwszy mutant. Naprawa dziedziczenia `GIT_*` w testach
-  z `git init` jest zgłoszona osobno (#292).
+  `TEMP` itp. i dwie zmienne pilota; wszystko inne, w tym każde `GIT_*`, jest odrzucane). Dotyczy to Strykera,
+  loadera i testów. To warstwa ograniczająca, nie izolacja systemowa,
+- testy (bez uruchamiania mutantów, bez sieci i poświadczeń):
+  `node --test scripts/mutation/isolation-guard.test.js scripts/mutation/safe-env.test.js`. Sprawdzono, że
+  psują się po celowym uszkodzeniu: guard kończący się kodem 0 daje 6 porażek z 11, sonda zwracająca 0 daje 1.
+
+### Kontrakt wymagany od #253 (dowód mechanizmu, nie próbki)
+
+Start mutantów jest dopuszczalny dopiero w środowisku, które samo wymusza izolację i którego konfigurację
+da się zweryfikować niezależnie od kodu pilota:
+
+1. kontener (lub równoważny izolator) uruchamiany z `--network none`, system plików główny tylko do odczytu,
+   zapis tylko w zamontowanej kopii roboczej, proces pod nieuprzywilejowanym UID, bez `HOME` użytkownika
+   i bez zamontowanych sekretów; jawna polityka w specyfikacji joba, odtwarzalna z repozytorium,
+2. weryfikacja obecności tej konfiguracji (np. odczyt `/proc/self/status` i przestrzeni nazw sieci, opcje
+   montowania), a nie próbkowanie wyników,
+3. negatywy kontrolne, które muszą dawać STOP: blokada dwóch adresów, ale sieć do innego hosta; katalog
+   nadrzędny tylko do odczytu, ale dostępny `HOME`; `HOME` bez czterech znanych plików, ale dostęp do
+   niezwiązanej ścieżki,
+4. całe drzewo procesów (Stryker, loader, testy) w tym samym izolatorze, z minimalnym środowiskiem,
+5. dopiero po spełnieniu 1-4 wolno zdjąć odmowę w `isolation-guard.js`; zmiana wymaga osobnego audytu.
+
+Naprawa dziedziczenia `GIT_*` w testach z `git init` jest zgłoszona osobno (#292).
 
 ## Koszt i wnioski
 

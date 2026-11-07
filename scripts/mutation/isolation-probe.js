@@ -1,18 +1,21 @@
 'use strict';
 
-// Sondy izolacji przed uruchomieniem jakiegokolwiek mutanta (wymóg #234, fail-closed): przebieg
-// mutacyjny rusza tylko wtedy, gdy KAŻDA sonda potwierdzi odcięcie. Brak odcięcia = wynik
-// `no-go-izolacja` i brak biegu; nie ma flagi, która to wyłącza.
-//   1. sieć: połączenie TCP z publicznym adresem musi się nie udać,
-//   2. zapis poza katalogiem przebiegu: plik kontrolny w katalogu nadrzędnym musi się nie zapisać,
-//   3. odczyt konfiguracji użytkownika (np. ~/.npmrc, ~/.gitconfig, ~/.ssh) musi się nie udać,
-//   4. otoczenie: brak poświadczeń, GIT_* i plików .clasp*.
-// Użycie: node scripts/mutation/isolation-probe.js   (kod wyjścia 0 = izolacja potwierdzona)
+// Sonda WYKRYWANIA ekspozycji (diagnostyka), a nie dowód izolacji. Może tylko zawetować: znajduje
+// dostęp, którego być nie powinno, ale NIGDY nie stwierdza, że izolacja jest skuteczna. Próbki są
+// skończone (dwa adresy IP, katalog nadrzędny, kilka plików użytkownika), więc „nic nie wykryto” nie
+// znaczy „odcięto”: zablokowane dwa adresy nie dowodzą braku sieci, brak czterech plików nie dowodzi
+// braku dostępu do reszty dysku. Dlatego kod wyjścia nigdy nie wynosi 0 i nic w pilocie nie
+// pozwala na start Strykera na jej podstawie (zob. isolation-guard.js). Dowód MECHANIZMU izolacji
+// (kontener bez sieci, ograniczony mount i UID, jawna polityka systemu plików) jest przedmiotem #253.
+//   1. sieć: czy połączenie TCP z publicznym adresem się udaje,
+//   2. zapis poza katalogiem przebiegu: czy plik kontrolny w katalogu nadrzędnym da się zapisać,
+//   3. odczyt konfiguracji użytkownika (np. ~/.npmrc, ~/.gitconfig, ~/.ssh),
+//   4. otoczenie: poświadczenia, GIT_* i pliki .clasp*.
+// Użycie: node scripts/mutation/isolation-probe.js   (kod 3 = wykryto ekspozycję, kod 4 = nic nie wykryto, bez zgody na start)
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const SECRET_NAME = /TOKEN|SECRET|PASS|KEY|CRED|AUTH|^CC_|^CLAUDE|^GOOGLE|^GH_|^GITHUB|^NPM_/i;
@@ -59,19 +62,22 @@ async function probe(env = process.env) {
   return failures;
 }
 
-/** Używane przez run-file.js i validate-selection.js: kończy proces kodem 3, gdy izolacji brak. */
-function assertIsolatedSync() {
-  const r = spawnSync(process.execPath, [path.join(__dirname, 'isolation-probe.js')], { encoding: 'utf8', env: process.env });
-  if (r.status !== 0) {
-    console.error(['no-go-izolacja: przebieg mutacyjny NIE wystartował.', r.stdout, r.stderr].join(' ').trim());
-    process.exit(3);
+/** Wynik sondy: nigdy zgoda na start. */
+function verdict(failures) {
+  if (failures.length) {
+    return { code: 3, text: ['WYKRYTO EKSPOZYCJĘ (no-go-izolacja):', ...failures.map(f => `- ${f}`)].join(String.fromCharCode(10)) };
   }
+  return {
+    code: 4,
+    text: 'Nie wykryto ekspozycji w skończonej liście próbek. To NIE jest dowód izolacji i nie daje zgody na start mutantów (no-go-izolacja do czasu dowodu mechanizmu w #253).'
+  };
 }
 
 if (require.main === module) {
   probe().then(failures => {
-    console.log(failures.length ? `NIEIZOLOWANE:\n- ${failures.join('\n- ')}` : 'izolacja potwierdzona');
-    process.exit(failures.length ? 3 : 0);
+    const v = verdict(failures);
+    console.log(v.text);
+    process.exit(v.code);
   });
 }
-module.exports = { probe, assertIsolatedSync };
+module.exports = { probe, verdict };

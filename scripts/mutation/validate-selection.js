@@ -13,14 +13,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { safeEnv } = require('./safe-env.js');
-const { assertIsolatedSync } = require('./isolation-probe.js');
+const { refuseStart } = require('./isolation-guard.js');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = path.join(ROOT, 'reports', 'mutation');
 const name = process.argv[2];
 const arg = (k, d) => Number((process.argv.find(a => a.startsWith(`--${k}=`)) || `=${d}`).split('=')[1]);
 const stem = name.replace(/\.gs$/, '');
-assertIsolatedSync(); // fail-closed: bez potwierdzonej izolacji żaden mutant nie wystartuje
+refuseStart('validate-selection.js'); // no-go-izolacja: w tej gałęzi mutanty nie startują (zob. isolation-guard.js)
 const result = JSON.parse(fs.readFileSync(path.join(OUT, `result-${stem}.json`), 'utf8'));
 const sel = JSON.parse(fs.readFileSync(path.join(OUT, `selection-${stem}.json`), 'utf8'));
 const mutants = Object.values(result.files)[0].mutants;
