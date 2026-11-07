@@ -1152,30 +1152,105 @@ describe('#231 werdykt ważny tylko od strony przeciwnej autorowi treści', () =
   });
 });
 
+/**
+ * Czytniki workflow po liniach, bez wyrażeń regularnych z nawrotami (CodeQL
+ * zgłosił `\s+` w powtórzeniu: wiele równoważnych podziałów wierszy). Każda
+ * funkcja robi jeden przebieg po liniach, więc koszt jest liniowy także dla
+ * wejścia bez końca bloku.
+ */
+const LINE_BREAK = /\r?\n/;
+
+/** Linie między pierwszą linią spełniającą `start` a następną spełniającą `stop`; null gdy brak któregoś końca. */
+function foldedBlockBefore(text, start, stop) {
+  const lines = String(text).split(LINE_BREAK);
+  const from = lines.findIndex(line => start.test(line));
+  if (from < 0) return null;
+  const to = lines.findIndex((line, index) => index > from && stop.test(line));
+  return to < 0 ? null : lines.slice(from + 1, to);
+}
+
+/** Lista `types: [...]` zdarzenia z sekcji `on:`; null gdy zdarzenia albo listy nie ma. */
+function workflowEventTypes(text, event) {
+  const lines = String(text).split(LINE_BREAK);
+  const at = lines.findIndex(line => line.trim() === event + ':');
+  if (at < 0) return null;
+  const typesLine = lines.slice(at + 1).find(line => line.trim().startsWith('types:'));
+  const list = typesLine && /\[([^\]]*)\]/.exec(typesLine);
+  return list ? list[1].split(',').map(name => name.trim()) : null;
+}
+
+/** Ścieżki z bloku `sparse-checkout: |` (kolejne linie ze ścieżką `scripts/...`). */
+function sparseCheckoutPaths(text) {
+  const lines = String(text).split(LINE_BREAK);
+  const at = lines.findIndex(line => line.trim() === 'sparse-checkout: |');
+  if (at < 0) return [];
+  const paths = [];
+  for (let i = at + 1; i < lines.length && lines[i].trim().startsWith('scripts/'); i++) paths.push(lines[i].trim());
+  return paths;
+}
+
+describe('#231 czytniki workflow w testach: wejście bez końca bloku nie wiesza testu', () => {
+  const START = /^[ \t]*if:[ \t]*>-[ \t]*$/;
+  const STOP = /^[ \t]+runs-on:/;
+
+  test('blok składany z końcem: zwraca linie warunku', () => {
+    const text = 'jobs:\n  reconcile:\n    if: >-\n      a &&\n      b\n    runs-on: x\n';
+    assert.deepEqual(foldedBlockBefore(text, START, STOP), ['      a &&', '      b']);
+    assert.deepEqual(foldedBlockBefore(text.replace(/\n/g, '\r\n'), START, STOP), ['      a &&', '      b']);
+  });
+
+  test('wielowierszowy if: >- bez runs-on: daje null i kończy się szybko (także dla 50000 pustych linii)', () => {
+    const start = Date.now();
+    const bez = 'jobs:\n  reconcile:\n    if: >-\n' + ' \n'.repeat(50000) + '      warunek\n';
+    assert.equal(foldedBlockBefore(bez, START, STOP), null);
+    assert.equal(foldedBlockBefore('    if: >-\n' + '  x\n'.repeat(50000), START, STOP), null);
+    assert.equal(foldedBlockBefore('brak bloku\n' + ' \n'.repeat(50000), START, STOP), null);
+    assert.ok(Date.now() - start < 1000, 'czytnik trwał ' + (Date.now() - start) + ' ms');
+  });
+
+  test('runs-on: przed blokiem nie kończy bloku, a pierwszy koniec za początkiem wygrywa', () => {
+    const text = '  runs-on: pierwszy\n    if: >-\n      a\n    runs-on: x\n    runs-on: y\n';
+    assert.deepEqual(foldedBlockBefore(text, START, STOP), ['      a']);
+  });
+
+  test('typy zdarzenia: lista z sekcji zdarzenia, null bez listy albo bez zdarzenia', () => {
+    assert.deepEqual(workflowEventTypes('on:\n  issues:\n    types: [a]\n  issue_comment:\n    types: [created, edited]\n', 'issue_comment'), ['created', 'edited']);
+    assert.equal(workflowEventTypes('on:\n  issues:\n    types: [a]\n', 'issue_comment'), null);
+    assert.equal(workflowEventTypes('on:\n  issue_comment:\n    branches: [x]\n', 'issue_comment'), null);
+    assert.equal(workflowEventTypes('on:\n  issue_comment:\n    types: [a\n', 'issue_comment'), null);
+  });
+
+  test('sparse-checkout: ścieżki do pierwszej linii spoza listy; brak bloku to pusta lista', () => {
+    const text = '        sparse-checkout: |\n          scripts/a.js\n          scripts/b.js\n        sparse-checkout-cone-mode: false\n';
+    assert.deepEqual(sparseCheckoutPaths(text), ['scripts/a.js', 'scripts/b.js']);
+    assert.deepEqual(sparseCheckoutPaths('nic\n'), []);
+    assert.deepEqual(sparseCheckoutPaths(' \n'.repeat(50000)), []);
+  });
+});
+
 describe('#231 kontrakt workflow: zdarzenia komentarza i pobierane pliki', () => {
   const root = path.join(__dirname, '..');
   const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'issue-audit.yml'), 'utf8');
 
   test('issue_comment reaguje na utworzenie, edycję i usunięcie komentarza', () => {
-    const block = /issue_comment:\s*\n\s*types:\s*\[([^\]]*)\]/.exec(workflow);
-    assert.ok(block, 'sekcja issue_comment z listą types');
-    const types = block[1].split(',').map(name => name.trim()).sort();
-    assert.deepEqual(types, ['created', 'deleted', 'edited']);
+    const types = workflowEventTypes(workflow, 'issue_comment');
+    assert.ok(types, 'sekcja issue_comment z listą types');
+    assert.deepEqual(types.sort(), ['created', 'deleted', 'edited']);
   });
 
   test('usunięcie komentarza przechodzi warunek joba niezależnie od autora usuniętego komentarza', () => {
-    const condition = /if:\s*>-\s*\n((?:\s+.*\n)+?)\s+runs-on:/.exec(workflow);
-    assert.ok(condition, 'warunek joba');
-    assert.match(condition[1], /github\.event\.action\s*==\s*'deleted'/);
-    assert.match(condition[1], /github\.event_name\s*==\s*'issues'/);
-    assert.match(condition[1], /!github\.event\.issue\.pull_request/);
-    assert.match(condition[1], /OWNER.*MEMBER.*COLLABORATOR/);
+    const lines = foldedBlockBefore(workflow, /^[ \t]*if:[ \t]*>-[ \t]*$/, /^[ \t]+runs-on:/);
+    assert.ok(lines, 'warunek joba');
+    const condition = lines.join('\n');
+    assert.match(condition, /github\.event\.action\s*==\s*'deleted'/);
+    assert.match(condition, /github\.event_name\s*==\s*'issues'/);
+    assert.match(condition, /!github\.event\.issue\.pull_request/);
+    assert.match(condition, /OWNER.*MEMBER.*COLLABORATOR/);
   });
 
   test('workflow pobiera każdy plik, który bramka ładuje przez require', () => {
-    const sparse = /sparse-checkout:\s*\|\s*\n((?:\s+scripts\/\S+\n)+)/.exec(workflow);
-    assert.ok(sparse, 'lista sparse-checkout');
-    const checkedOut = sparse[1].split('\n').map(line => line.trim()).filter(Boolean);
+    const checkedOut = sparseCheckoutPaths(workflow);
+    assert.ok(checkedOut.length, 'lista sparse-checkout');
     const seen = new Set();
     const queue = ['scripts/quality/issue-audit-gate.js'];
     while (queue.length) {
