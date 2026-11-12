@@ -304,10 +304,10 @@ const MAX_MARKUP_PASSES = 16;
 function stripMarkup(html) {
   let current = String(html || '');
   for (let pass = 0; pass < MAX_MARKUP_PASSES; pass++) {
-    const next = stripAttributes(current)
-      // Przekreślenie to wartość wycofana przez autora, nie druga wartość.
-      .replace(/<(del|s|strike)>[\s\S]*?<\/\1>/g, '')
-      .replace(/<[^<>]*>/g, '');
+    current = stripAttributes(current);
+    // Przekreślenie to wartość wycofana przez autora, nie druga wartość: pierwsza gałąź wzorca
+    // zdejmuje je razem z treścią, druga zdejmuje pozostałe, najbardziej wewnętrzne znaczniki.
+    const next = current.replace(/<(del|s|strike)>[\s\S]*?<\/\1>|<[^<>]*>/g, '');
     if (next === current) return current;
     current = next;
   }
