@@ -35,9 +35,32 @@ function normalizeHeading(line) {
   return line.replace(/^#{2,3}\s*/, '').trim().toLowerCase();
 }
 
-/** Dzieli treść na sekcje po nagłówkach `##`/`###`; komentarze HTML szablonu są usuwane. */
+/** Najwięcej przebiegów usuwania komentarzy HTML; głębsze zagnieżdżenie to treść do odrzucenia. */
+const MAX_COMMENT_PASSES = 16;
+
+/**
+ * Usuwa komentarze HTML aż do stanu stałego. Jeden przebieg zostawiałby
+ * komentarz złożony przez usunięcie wewnętrznego (`<!<!-- x -->-- ukryte -->`),
+ * więc sekcje w nim zawarte byłyby czytane jak zwykła treść (CodeQL #1).
+ * Bez stanu stałego w limicie przebiegów zwraca `null` (wejście do odrzucenia).
+ */
+function stripHtmlComments(body) {
+  let current = String(body || '');
+  for (let pass = 0; pass < MAX_COMMENT_PASSES; pass++) {
+    const next = current.replace(/<!--[\s\S]*?-->/g, '');
+    if (next === current) return current;
+    current = next;
+  }
+  return null;
+}
+
+/**
+ * Dzieli treść na sekcje po nagłówkach `##`/`###`; komentarze HTML szablonu są usuwane.
+ * Zwraca `null`, gdy komentarze są zagnieżdżone głębiej niż limit przebiegów.
+ */
 function splitSections(body) {
-  const text = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const text = stripHtmlComments(body);
+  if (text === null) return null;
   const sections = {};
   let current = '_preamble';
   sections[current] = [];
@@ -153,6 +176,9 @@ function evaluate(body) {
     return { ok: false, problems: ['Treść PR-a jest pusta; wypełnij szablon.'] };
   }
   const sections = splitSections(body);
+  if (sections === null) {
+    return { ok: false, problems: ['Komentarze HTML w treści są zagnieżdżone głębiej niż ' + MAX_COMMENT_PASSES + ' poziomów; uprość treść PR-a.'] };
+  }
   checkTestMatrix(findSection(sections, 'testMatrix'), problems);
   checkEvidence(findSection(sections, 'evidence'), problems);
   checkLinks(findSection(sections, 'links'), problems);

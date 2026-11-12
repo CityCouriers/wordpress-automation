@@ -205,3 +205,46 @@ describe('pr-template: CLI', () => {
     assert.equal(run({}, ['--body-file']).code, 2);
   });
 });
+
+describe('#290 komentarze HTML usuwane do stanu stałego', () => {
+  const { splitSections } = require('../scripts/quality/pr-template');
+  const CZYSTA = '## Test matrix\n\n| T1 | x |\n\n';
+  const nazwy = body => Object.keys(splitSections(body));
+  // Komentarz zagnieżdżony na `poziomy` poziomów: poziom 0 to zwykły komentarz, każdy kolejny składa się dopiero po usunięciu wewnętrznego.
+  const zagniezdzony = poziomy => {
+    let tekst = '<!-- x -->';
+    for (let i = 0; i < poziomy; i++) tekst = '<!' + tekst + '-- y -->';
+    return tekst;
+  };
+
+  test('komentarz złożony przez usunięcie wewnętrznego ukrywa swoją treść tak samo jak zwykły komentarz', () => {
+    const ukryte = '\n## Links\n\nFixes #1\n';
+    assert.deepEqual(nazwy(CZYSTA), ['_preamble', 'test matrix']);
+    for (const komentarz of ['<!--' + ukryte + '-->', '<!<!-- a -->--' + ukryte + '-->', '<!-<!-- a -->-' + ukryte + '-->',
+      '<!<!<!-- a -->-- b -->--' + ukryte + '-->', '<!-- <!-- -->']) {
+      assert.deepEqual(splitSections(CZYSTA + komentarz + '\n'), splitSections(CZYSTA + '\n'), komentarz);
+    }
+  });
+
+  test('komentarze obok siebie i w środku sekcji znikają, treść wokół zostaje', () => {
+    const sections = splitSections('## Links\n\n<!-- a --> Fixes <!-- b -->#7<!-- c -->\n');
+    assert.deepEqual(sections.links.join('\n').trim(), 'Fixes #7');
+  });
+
+  test('zagnieżdżenie głębsze niż limit przebiegów: splitSections zwraca null, evaluate odrzuca treść', () => {
+    // Granica: 14 poziomów jest jeszcze usuwane, 15 nie (każdy poziom to przebieg, a ostatni potwierdza stan stały).
+    assert.deepEqual(nazwy(CZYSTA + zagniezdzony(14)), ['_preamble', 'test matrix']);
+    assert.equal(splitSections(CZYSTA + zagniezdzony(15)), null);
+    const wynik = evaluate(GOOD_EN + zagniezdzony(15));
+    assert.equal(wynik.ok, false);
+    assert.deepEqual(wynik.problems, ['Komentarze HTML w treści są zagnieżdżone głębiej niż 16 poziomów; uprość treść PR-a.']);
+    assert.equal(evaluate(GOOD_EN + zagniezdzony(14)).ok, true);
+  });
+
+  test('ogromna treść z głębokim zagnieżdżeniem kończy się szybko', () => {
+    const start = Date.now();
+    const glebokie = '<!'.repeat(20000) + '<!-- x -->' + '-- y -->'.repeat(20000);
+    assert.equal(splitSections(glebokie), null);
+    assert.ok(Date.now() - start < 5000, 'limit przebiegów ogranicza koszt');
+  });
+});
