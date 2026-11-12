@@ -66,15 +66,31 @@ const LATEST = '2026-09-08T14:00:00Z';
 const labeled = (label, createdAt) => ({ type: 'LABELED', label, createdAt });
 const unlabeled = (label, createdAt) => ({ type: 'UNLABELED', label, createdAt });
 
+// Podpisy i aplikacje stron (#231). Wszystko idzie z jednego konta, więc stronę
+// wyznacza podpis ostatniej linii zgodny z `performed_via_github_app`: ChatGPT
+// pisze przez konektor, Claude Code przez `gh` (pole puste).
+const SIGN_CLAUDE = '_— Claude Code (agent lokalny)_';
+const SIGN_GPT = '_— ChatGPT_';
+const GPT_APP = 'ChatGPT Codex Connector';
+
+// Domyślnie werdykt pisze Claude przez `gh` pod treścią ChatGPT; testy macierzy
+// #231 odwracają strony jawnie.
 const cmd = (kind, createdAt, extra = {}) => Object.assign({
-  body: '/audit-' + kind + '\n\nUzasadnienie.',
+  body: '/audit-' + kind + '\n\nUzasadnienie.\n\n' + SIGN_CLAUDE,
   authorAssociation: 'OWNER',
-  createdAt: createdAt
+  createdAt: createdAt,
+  app: '',
+  lastEditedAt: null
 }, extra);
 
+// Domyślnie treść napisał ChatGPT (bez `by:agent`, przez konektor): autor
+// ustalony, więc audytuje Claude. Etykiet nie dotykamy, żeby testy zakresu
+// i triage'u mówiły o swoim.
 const issue = (over = {}) => Object.assign({
   state: 'open',
   labels: ['P2', 'T2'],
+  body: 'Treść.\n\n' + SIGN_GPT,
+  app: GPT_APP,
   barrier: NEW,
   comments: []
 }, over);
@@ -284,7 +300,7 @@ describe('#139 bariera rewizji', () => {
     //
     // Sprawdzamy ARGUMENTY każdego wywołania, a nie dosłowny tekst: inaczej
     // spacja albo dodatkowy parametr (`after:`) przepuściłyby regresję.
-    const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'quality', 'issue-audit-gate.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'quality', 'issue-audit-fetch.js'), 'utf8');
     const calls = [...source.matchAll(/userContentEdits\s*\(([^)]*)\)/g)].map(m => m[1]);
     assert.ok(calls.length, 'zapytanie musi w ogóle pobierać historię edycji treści');
     for (const args of calls) {
@@ -917,5 +933,403 @@ describe('#139 kontrakt workflow', () => {
     assert.deepEqual(names, [AUDIT_CHANGES, AUDIT_OK, AUDIT_PENDING].sort());
     assert.ok(labels.families.audit, 'rodzina opisana w families');
     assert.match(labels.families.audit.cardinality, /0 (lub|or) 1/);
+  });
+});
+
+describe('#231 werdykt ważny tylko od strony przeciwnej autorowi treści', () => {
+  // Numeracja 1-7 odpowiada macierzy z opisu #231.
+  const { latestDecision, parseCommand } = gate;
+
+  const claudeIssue = (over = {}) => issue(Object.assign({
+    labels: ['P2', 'T2', 'by:agent'], body: 'Specyfikacja.\n\n' + SIGN_CLAUDE, app: ''
+  }, over));
+  // Werdykt ChatGPT przez konektor; werdykt Claude przez `gh` to domyślne `cmd()`.
+  const gptVerdict = (kind, createdAt, extra = {}) => cmd(kind, createdAt, Object.assign({
+    body: '/audit-' + kind + '\n\nUzasadnienie.\n\n' + SIGN_GPT, app: GPT_APP
+  }, extra));
+  const verdictBody = (first, sign = SIGN_CLAUDE) => first + '\n\nUzasadnienie.\n\n' + sign;
+
+  test('1: treść Claude z by:agent, werdykt ChatGPT przez konektor - audit:ok i audit:changes', () => {
+    assert.equal(reconcile(claudeIssue({ comments: [gptVerdict('ok', LATER)] })).label, AUDIT_OK);
+    assert.equal(reconcile(claudeIssue({ comments: [gptVerdict('changes', LATER)] })).label, AUDIT_CHANGES);
+  });
+
+  test('2: podpis ChatGPT wysłany przez gh albo podpis Claude przez konektor nie mają strony - audit:pending', () => {
+    const viaGh = gptVerdict('ok', LATER, { app: '' });
+    assert.equal(reconcile(claudeIssue({ comments: [viaGh] })).label, AUDIT_PENDING);
+    const claudeViaConnector = cmd('ok', LATER, { app: GPT_APP });
+    assert.equal(reconcile(issue({ comments: [claudeViaConnector] })).label, AUDIT_PENDING);
+    const otherApp = gptVerdict('ok', LATER, { app: 'Inna aplikacja' });
+    assert.equal(reconcile(claudeIssue({ comments: [otherApp] })).label, AUDIT_PENDING);
+  });
+
+  test('3: treść Claude i werdykt Claude - audit:pending, to werdykt autora własnej treści', () => {
+    const result = reconcile(claudeIssue({ comments: [cmd('ok', LATER)] }));
+    assert.equal(result.label, AUDIT_PENDING);
+    assert.equal(result.action, 'set');
+    assert.match(result.reason, /brak ważnego rozstrzygnięcia/);
+  });
+
+  test('3: ten sam przypadek w drugą stronę - treść ChatGPT i werdykt ChatGPT też nie rozstrzygają', () => {
+    assert.equal(reconcile(issue({ comments: [gptVerdict('ok', LATER)] })).label, AUDIT_PENDING);
+    assert.equal(reconcile(issue({ comments: [gptVerdict('changes', LATER)] })).label, AUDIT_PENDING);
+  });
+
+  test('4: treść ChatGPT bez by:agent, werdykt Claude przez gh - audit:ok i audit:changes', () => {
+    assert.equal(reconcile(issue({ comments: [cmd('ok', LATER)] })).label, AUDIT_OK);
+    assert.equal(reconcile(issue({ comments: [cmd('changes', LATER)] })).label, AUDIT_CHANGES);
+  });
+
+  describe('5: autorstwo ustala zgodność podpisu, by:agent i aplikacji - niezgodność to audit:pending', () => {
+    const BY = ['P2', 'T2', 'by:agent'];
+    const przypadki = [
+      ['by:agent przy treści z podpisem ChatGPT (konektor)', { labels: BY, body: 'x\n\n' + SIGN_GPT, app: GPT_APP }],
+      ['by:agent przy treści z podpisem ChatGPT (gh)', { labels: BY, body: 'x\n\n' + SIGN_GPT, app: '' }],
+      ['podpis Claude bez by:agent', { body: 'x\n\n' + SIGN_CLAUDE, app: '' }],
+      ['podpis Claude z by:agent, ale utworzone przez konektor', { labels: BY, body: 'x\n\n' + SIGN_CLAUDE, app: GPT_APP }],
+      ['podpis ChatGPT bez by:agent, ale utworzone przez gh', { body: 'x\n\n' + SIGN_GPT, app: '' }],
+      ['podpis ChatGPT, utworzone przez inną aplikację', { body: 'x\n\n' + SIGN_GPT, app: 'Inna aplikacja' }],
+      ['podpis Claude, utworzone przez inną aplikację', { labels: BY, body: 'x\n\n' + SIGN_CLAUDE, app: 'Inna aplikacja' }],
+      ['brak podpisu przy by:agent', { labels: BY, body: 'x', app: '' }],
+      ['brak podpisu bez by:agent, utworzone przez gh', { body: 'x', app: '' }],
+      ['brak podpisu bez by:agent, utworzone przez konektor', { body: 'x', app: GPT_APP }],
+      ['brak treści i aplikacji', { body: undefined, app: undefined }]
+    ];
+    for (const [nazwa, over] of przypadki) {
+      test(nazwa, () => {
+        const result = reconcile(issue(Object.assign({}, over, { comments: [gptVerdict('ok', LATER), cmd('ok', LATEST)] })));
+        assert.equal(result.label, AUDIT_PENDING, 'żadna ze stron nie jest ustalonym recenzentem');
+        assert.match(result.reason, /autorstwo nieustalone/);
+      });
+    }
+
+    test('utrata by:agent cofa wcześniejsze audit:ok, bo autorstwo przestało być ustalone', () => {
+      const result = reconcile(issue({
+        labels: ['P2', 'T2', AUDIT_OK], body: 'x\n\n' + SIGN_CLAUDE, app: '', comments: [gptVerdict('ok', LATER)]
+      }));
+      assert.equal(result.action, 'set');
+      assert.equal(result.label, AUDIT_PENDING);
+    });
+
+    test('ustalone autorstwo nie jest powodem pending, gdy werdykt stoi', () => {
+      const result = reconcile(claudeIssue({ comments: [gptVerdict('ok', LATER)] }));
+      assert.doesNotMatch(result.reason, /nieustalone/);
+    });
+  });
+
+  describe('6: komenda tylko w pierwszej niepustej linii, bez wciętego kodu, bez dalszych znaków nazwy', () => {
+    const nieKomendy = [
+      '/audit-ok-nie', '/audit-ok_nie', '/audit-okay', '/audit-ok2', '/audit-changes-x', '/audit-changesx',
+      '    /audit-ok', '\t/audit-ok', '   \t/audit-ok', 'Cytat:\n\n/audit-ok', '> /audit-ok', '`/audit-ok`',
+      '```\n/audit-ok\n```', 'Zgadzam się, /audit-ok', '/AUDIT-OK', 'audit-ok'
+    ];
+    for (const body of nieKomendy) {
+      test('nie jest komendą: ' + JSON.stringify(body), () => {
+        assert.equal(parseCommand(body, DEFAULT_CONFIG), '');
+        const comment = gptVerdict('ok', LATER, { body: verdictBody(body, SIGN_GPT) });
+        assert.equal(reconcile(claudeIssue({ comments: [comment] })).label, AUDIT_PENDING, 'brak werdyktu');
+      });
+    }
+
+    const komendy = [
+      ['/audit-ok', 'ok'], ['/audit-changes', 'changes'], ['  /audit-ok', 'ok'], ['\n\n/audit-changes', 'changes'],
+      ['/audit-ok\r\nUzasadnienie.', 'ok'], ['/audit-ok.', 'ok'], ['/audit-ok: tak', 'ok'], ['/audit-ok tak', 'ok'],
+      ['/audit-changes!', 'changes'], ['  \n/audit-ok', 'ok']
+    ];
+    for (const [body, kind] of komendy) {
+      test('jest komendą: ' + JSON.stringify(body), () => {
+        assert.equal(parseCommand(body, DEFAULT_CONFIG), kind);
+      });
+    }
+
+    test('komenda stoi w pierwszej niepustej linii, a druga komenda niżej nie zmienia werdyktu', () => {
+      assert.equal(parseCommand('/audit-ok\n/audit-changes', DEFAULT_CONFIG), 'ok');
+      assert.equal(parseCommand('Komentarz\n/audit-ok', DEFAULT_CONFIG), '');
+      assert.equal(parseCommand(null, DEFAULT_CONFIG), '');
+      assert.equal(parseCommand('', DEFAULT_CONFIG), '');
+    });
+  });
+
+  describe('7: komentarz edytowany po publikacji nie jest werdyktem', () => {
+    test('znacznik lastEditedAt, także tekstowy „brak danych”, unieważnia komentarz', () => {
+      for (const edited of ['2026-09-08T13:00:00Z', 'unknown']) {
+        const result = reconcile(claudeIssue({ comments: [gptVerdict('ok', LATER, { lastEditedAt: edited })] }));
+        assert.equal(result.label, AUDIT_PENDING, edited);
+      }
+    });
+
+    test('nieedytowany komentarz (null, brak pola, pusty napis) jest werdyktem', () => {
+      for (const edited of [null, undefined, '']) {
+        const result = reconcile(claudeIssue({ comments: [gptVerdict('ok', LATER, { lastEditedAt: edited })] }));
+        assert.equal(result.label, AUDIT_OK, String(edited));
+      }
+    });
+
+    test('edytowany werdykt zdejmuje audit:ok, a wcześniejszy nieedytowany nadal obowiązuje', () => {
+      const earlier = gptVerdict('changes', LATER);
+      const edited = gptVerdict('ok', LATEST, { lastEditedAt: '2026-09-08T15:00:00Z' });
+      assert.equal(reconcile(claudeIssue({ comments: [earlier, edited] })).label, AUDIT_CHANGES);
+      const result = reconcile(claudeIssue({ labels: ['P2', 'T2', 'by:agent', AUDIT_OK], comments: [edited] }));
+      assert.equal(result.action, 'set');
+      assert.equal(result.label, AUDIT_PENDING);
+    });
+  });
+
+  describe('podpis komentarza wyznacza stronę', () => {
+    const asGpt = (body, over = {}) => gptVerdict('ok', LATER, Object.assign({ body: body }, over));
+
+    test('komentarz bez podpisu, z podpisem poza ostatnią linią albo we wcięciu nie ma strony', () => {
+      const bodies = [
+        '/audit-ok\n\nUzasadnienie.',
+        '/audit-ok\n' + SIGN_GPT + '\nUzasadnienie.',
+        '/audit-ok\n\n    ' + SIGN_GPT,
+        '/audit-ok\n\n\t' + SIGN_GPT,
+        '/audit-ok\n\n— ChatGPT i ktoś jeszcze',
+        '/audit-ok\n\n_— ChatGPT_ _— ChatGPT_'
+      ];
+      for (const body of bodies) {
+        assert.equal(reconcile(claudeIssue({ comments: [asGpt(body)] })).label, AUDIT_PENDING, JSON.stringify(body));
+      }
+    });
+
+    test('podpis w kursywie, goły, z końcowymi pustymi liniami i CRLF jest rozpoznawany', () => {
+      const bodies = [
+        '/audit-ok\n\n_— ChatGPT_', '/audit-ok\n\n— ChatGPT', '/audit-ok\n\n_— ChatGPT_\n\n\n',
+        '/audit-ok\r\n\r\n_— ChatGPT_\r\n', '/audit-ok\n\n  _— ChatGPT_  '
+      ];
+      for (const body of bodies) {
+        assert.equal(reconcile(claudeIssue({ comments: [asGpt(body)] })).label, AUDIT_OK, JSON.stringify(body));
+      }
+    });
+
+    test('podobny, ale inny podpis nie liczy się jako strona', () => {
+      const bodies = ['/audit-ok\n\n_- ChatGPT_', '/audit-ok\n\n__— ChatGPT__', '/audit-ok\n\n_— chatgpt_', '/audit-ok\n\nconstructor',
+        '/audit-ok\n\n__proto__'];
+      for (const body of bodies) {
+        assert.equal(reconcile(claudeIssue({ comments: [asGpt(body)] })).label, AUDIT_PENDING, JSON.stringify(body));
+      }
+    });
+  });
+
+  describe('wybór werdyktu spośród komentarzy', () => {
+    test('nieuprawniony, własny albo edytowany komentarz nowszy od ważnego nie zasłania go', () => {
+      const valid = gptVerdict('ok', LATER);
+      const comments = [
+        valid,
+        cmd('changes', LATEST),
+        gptVerdict('changes', LATEST, { authorAssociation: 'NONE' }),
+        gptVerdict('changes', LATEST, { lastEditedAt: '2026-09-08T15:00:00Z' })
+      ];
+      assert.equal(reconcile(claudeIssue({ comments })).label, AUDIT_OK);
+    });
+
+    test('z dwóch ważnych werdyktów wygrywa nowszy, niezależnie od kolejności na liście', () => {
+      const older = gptVerdict('ok', LATER);
+      const newer = gptVerdict('changes', LATEST);
+      assert.equal(reconcile(claudeIssue({ comments: [older, newer] })).label, AUDIT_CHANGES);
+      assert.equal(reconcile(claudeIssue({ comments: [newer, older] })).label, AUDIT_CHANGES);
+    });
+
+    test('dobrowolne wejście przez komendę na starej issue działa tylko dla strony przeciwnej', () => {
+      const own = reconcile(claudeIssue({ barrier: OLD, comments: [cmd('ok', LATER)] }));
+      assert.equal(own.action, 'none', 'własny werdykt nie wprowadza issue do bramki');
+      const foreign = reconcile(claudeIssue({ barrier: OLD, comments: [gptVerdict('ok', LATER)] }));
+      assert.equal(foreign.label, AUDIT_OK);
+    });
+
+    test('issue o nieustalonym autorstwie sprzed startu bramki zostaje poza bramką', () => {
+      const result = reconcile(issue({ barrier: OLD, body: 'x', app: '', comments: [cmd('ok', LATER), gptVerdict('ok', LATER)] }));
+      assert.equal(result.action, 'none');
+    });
+
+    test('latestDecision bez recenzenta nie zwraca niczego, także dla komentarza bez strony', () => {
+      const comments = [cmd('ok', LATER, { body: '/audit-ok\n\nBez podpisu.' }), gptVerdict('ok', LATER)];
+      assert.equal(latestDecision(comments, NEW, DEFAULT_CONFIG, ''), null);
+      assert.equal(latestDecision(comments, NEW, DEFAULT_CONFIG, undefined), null);
+      assert.equal(latestDecision(comments, NEW, DEFAULT_CONFIG, 'claude'), null);
+      assert.equal(latestDecision(comments, NEW, DEFAULT_CONFIG, 'gpt'), comments[1]);
+    });
+  });
+});
+
+/**
+ * Czytniki workflow po liniach, bez wyrażeń regularnych z nawrotami (CodeQL
+ * zgłosił `\s+` w powtórzeniu: wiele równoważnych podziałów wierszy). Każda
+ * funkcja robi jeden przebieg po liniach, więc koszt jest liniowy także dla
+ * wejścia bez końca bloku.
+ */
+const LINE_BREAK = /\r?\n/;
+
+/** Linie między pierwszą linią spełniającą `start` a następną spełniającą `stop`; null gdy brak któregoś końca. */
+function foldedBlockBefore(text, start, stop) {
+  const lines = String(text).split(LINE_BREAK);
+  const from = lines.findIndex(line => start.test(line));
+  if (from < 0) return null;
+  const to = lines.findIndex((line, index) => index > from && stop.test(line));
+  return to < 0 ? null : lines.slice(from + 1, to);
+}
+
+/** Lista `types: [...]` zdarzenia z sekcji `on:`; null gdy zdarzenia albo listy nie ma. */
+function workflowEventTypes(text, event) {
+  const lines = String(text).split(LINE_BREAK);
+  const at = lines.findIndex(line => line.trim() === event + ':');
+  if (at < 0) return null;
+  const typesLine = lines.slice(at + 1).find(line => line.trim().startsWith('types:'));
+  const list = typesLine && /\[([^\]]*)\]/.exec(typesLine);
+  return list ? list[1].split(',').map(name => name.trim()) : null;
+}
+
+/** Ścieżki z bloku `sparse-checkout: |` (kolejne linie ze ścieżką `scripts/...`). */
+function sparseCheckoutPaths(text) {
+  const lines = String(text).split(LINE_BREAK);
+  const at = lines.findIndex(line => line.trim() === 'sparse-checkout: |');
+  if (at < 0) return [];
+  const paths = [];
+  for (let i = at + 1; i < lines.length && lines[i].trim().startsWith('scripts/'); i++) paths.push(lines[i].trim());
+  return paths;
+}
+
+describe('#231 czytniki workflow w testach: wejście bez końca bloku nie wiesza testu', () => {
+  const START = /^[ \t]*if:[ \t]*>-[ \t]*$/;
+  const STOP = /^[ \t]+runs-on:/;
+
+  test('blok składany z końcem: zwraca linie warunku', () => {
+    const text = 'jobs:\n  reconcile:\n    if: >-\n      a &&\n      b\n    runs-on: x\n';
+    assert.deepEqual(foldedBlockBefore(text, START, STOP), ['      a &&', '      b']);
+    assert.deepEqual(foldedBlockBefore(text.replace(/\n/g, '\r\n'), START, STOP), ['      a &&', '      b']);
+  });
+
+  test('wielowierszowy if: >- bez runs-on: daje null i kończy się szybko (także dla 50000 pustych linii)', () => {
+    const start = Date.now();
+    const bez = 'jobs:\n  reconcile:\n    if: >-\n' + ' \n'.repeat(50000) + '      warunek\n';
+    assert.equal(foldedBlockBefore(bez, START, STOP), null);
+    assert.equal(foldedBlockBefore('    if: >-\n' + '  x\n'.repeat(50000), START, STOP), null);
+    assert.equal(foldedBlockBefore('brak bloku\n' + ' \n'.repeat(50000), START, STOP), null);
+    assert.ok(Date.now() - start < 1000, 'czytnik trwał ' + (Date.now() - start) + ' ms');
+  });
+
+  test('runs-on: przed blokiem nie kończy bloku, a pierwszy koniec za początkiem wygrywa', () => {
+    const text = '  runs-on: pierwszy\n    if: >-\n      a\n    runs-on: x\n    runs-on: y\n';
+    assert.deepEqual(foldedBlockBefore(text, START, STOP), ['      a']);
+  });
+
+  test('typy zdarzenia: lista z sekcji zdarzenia, null bez listy albo bez zdarzenia', () => {
+    assert.deepEqual(workflowEventTypes('on:\n  issues:\n    types: [a]\n  issue_comment:\n    types: [created, edited]\n', 'issue_comment'), ['created', 'edited']);
+    assert.equal(workflowEventTypes('on:\n  issues:\n    types: [a]\n', 'issue_comment'), null);
+    assert.equal(workflowEventTypes('on:\n  issue_comment:\n    branches: [x]\n', 'issue_comment'), null);
+    assert.equal(workflowEventTypes('on:\n  issue_comment:\n    types: [a\n', 'issue_comment'), null);
+  });
+
+  test('sparse-checkout: ścieżki do pierwszej linii spoza listy; brak bloku to pusta lista', () => {
+    const text = '        sparse-checkout: |\n          scripts/a.js\n          scripts/b.js\n        sparse-checkout-cone-mode: false\n';
+    assert.deepEqual(sparseCheckoutPaths(text), ['scripts/a.js', 'scripts/b.js']);
+    assert.deepEqual(sparseCheckoutPaths('nic\n'), []);
+    assert.deepEqual(sparseCheckoutPaths(' \n'.repeat(50000)), []);
+  });
+});
+
+describe('#231 kontrakt workflow: zdarzenia komentarza i pobierane pliki', () => {
+  const root = path.join(__dirname, '..');
+  const workflow = fs.readFileSync(path.join(root, '.github', 'workflows', 'issue-audit.yml'), 'utf8');
+
+  test('issue_comment reaguje na utworzenie, edycję i usunięcie komentarza', () => {
+    const types = workflowEventTypes(workflow, 'issue_comment');
+    assert.ok(types, 'sekcja issue_comment z listą types');
+    assert.deepEqual(types.sort(), ['created', 'deleted', 'edited']);
+  });
+
+  test('usunięcie komentarza przechodzi warunek joba niezależnie od autora usuniętego komentarza', () => {
+    const lines = foldedBlockBefore(workflow, /^[ \t]*if:[ \t]*>-[ \t]*$/, /^[ \t]+runs-on:/);
+    assert.ok(lines, 'warunek joba');
+    const condition = lines.join('\n');
+    assert.match(condition, /github\.event\.action\s*==\s*'deleted'/);
+    assert.match(condition, /github\.event_name\s*==\s*'issues'/);
+    assert.match(condition, /!github\.event\.issue\.pull_request/);
+    assert.match(condition, /OWNER.*MEMBER.*COLLABORATOR/);
+  });
+
+  test('workflow pobiera każdy plik, który bramka ładuje przez require', () => {
+    const checkedOut = sparseCheckoutPaths(workflow);
+    assert.ok(checkedOut.length, 'lista sparse-checkout');
+    const seen = new Set();
+    const queue = ['scripts/quality/issue-audit-gate.js'];
+    while (queue.length) {
+      const file = queue.pop();
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const source = fs.readFileSync(path.join(root, file), 'utf8');
+      for (const match of source.matchAll(/require\('(\.[^']+)'\)/g)) {
+        queue.push(path.posix.join(path.posix.dirname(file), match[1]).replace(/(?<!\.js)$/, '.js'));
+      }
+    }
+    assert.ok(seen.size >= 3, 'bramka ma co najmniej moduły stron i odczytu: ' + [...seen].join(', '));
+    for (const file of seen) assert.ok(checkedOut.includes(file), file + ' nie jest pobierany przez workflow');
+  });
+
+  test('komentarz-znacznik nie twierdzi, że zmieniła się wyłącznie treść issue', () => {
+    assert.match(workflow, /komentarz z werdyktem \(edycja lub usunięcie\)/);
+  });
+});
+
+describe('#231 powody wyniku są jedynym śladem w logu przebiegu', () => {
+  const claudeIssue = (over = {}) => issue(Object.assign({
+    labels: ['P2', 'T2', 'by:agent'], body: 'Specyfikacja.\n\n' + SIGN_CLAUDE, app: ''
+  }, over));
+  const gptVerdict = (kind, createdAt, extra = {}) => cmd(kind, createdAt, Object.assign({
+    body: '/audit-' + kind + '\n\nUzasadnienie.\n\n' + SIGN_GPT, app: GPT_APP
+  }, extra));
+
+  test('issue zamknięta, brak bariery, poza zakresem', () => {
+    assert.deepEqual(reconcile(issue({ state: 'closed', labels: ['P2', AUDIT_OK] })),
+      { action: 'none', label: AUDIT_OK, reason: 'issue zamknięta' });
+    assert.deepEqual(reconcile(issue({ barrier: '', labels: ['P2', AUDIT_OK] })),
+      { action: 'none', label: AUDIT_OK, reason: 'brak bariery rewizji (fail-closed)' });
+    assert.deepEqual(reconcile(issue({ labels: ['P3', 'T1', AUDIT_OK] })),
+      { action: 'clear', label: '', reason: 'issue poza zakresem bramki' });
+    assert.deepEqual(reconcile(issue({ labels: ['P3', 'T1'] })),
+      { action: 'none', label: '', reason: 'issue poza zakresem bramki' });
+  });
+
+  test('werdykt, brak werdyktu, bez zmiany i duplikat rodziny audit:*', () => {
+    const reason = 'rozstrzygnięcie z ' + LATER + ' nowsze niż rewizja ' + NEW;
+    assert.deepEqual(reconcile(issue({ comments: [cmd('ok', LATER)] })),
+      { action: 'set', label: AUDIT_OK, reason });
+    assert.deepEqual(reconcile(issue({ labels: ['P2', AUDIT_PENDING], comments: [cmd('ok', LATER)] })),
+      { action: 'set', label: AUDIT_OK, reason });
+    assert.deepEqual(reconcile(issue({ labels: ['P2', AUDIT_OK], comments: [cmd('ok', LATER)] })),
+      { action: 'none', label: AUDIT_OK, reason: reason + ' (bez zmiany)' });
+    assert.deepEqual(reconcile(issue({ labels: ['P2', AUDIT_OK, AUDIT_PENDING], comments: [cmd('ok', LATER)] })),
+      { action: 'set', label: AUDIT_OK, reason: reason + ' (usuwam duplikat rodziny audit:*)' });
+    assert.deepEqual(reconcile(issue()),
+      { action: 'set', label: AUDIT_PENDING, reason: 'brak ważnego rozstrzygnięcia dla rewizji ' + NEW });
+    assert.deepEqual(reconcile(issue({ labels: ['P2', AUDIT_PENDING] })),
+      { action: 'none', label: AUDIT_PENDING, reason: 'brak ważnego rozstrzygnięcia dla rewizji ' + NEW + ' (bez zmiany)' });
+  });
+
+  test('autorstwo nieustalone niesie powód z modułu stron', () => {
+    assert.deepEqual(reconcile(issue({ body: 'x', comments: [cmd('ok', LATER)] })), {
+      action: 'set', label: AUDIT_PENDING,
+      reason: 'autorstwo nieustalone: brak podpisu strony w ostatniej linii treści'
+    });
+    assert.deepEqual(reconcile(claudeIssue({ app: GPT_APP })), {
+      action: 'set', label: AUDIT_PENDING,
+      reason: 'autorstwo nieustalone: podpis Claude Code, ale zgłoszenie utworzył ChatGPT Codex Connector'
+    });
+  });
+
+  test('komentarz z datą równą barierze albo bez daty nie jest werdyktem', () => {
+    assert.equal(reconcile(claudeIssue({ comments: [gptVerdict('ok', NEW)] })).label, AUDIT_PENDING, 'ta sama sekunda co edycja treści');
+    for (const createdAt of ['', null, undefined]) {
+      assert.equal(reconcile(claudeIssue({ comments: [gptVerdict('ok', createdAt)] })).label, AUDIT_PENDING, String(createdAt));
+    }
+    assert.equal(reconcile(claudeIssue({ comments: [gptVerdict('ok', '2026-09-08T10:00:01Z')] })).label, AUDIT_OK, 'sekunda później');
+  });
+
+  test('latestDecision bez listy komentarzy albo z komentarzem bez uprawnień nie zwraca niczego', () => {
+    for (const comments of [undefined, null, []]) {
+      assert.equal(gate.latestDecision(comments, NEW, DEFAULT_CONFIG, 'gpt'), null, String(comments));
+    }
+    const noAssociation = gptVerdict('ok', LATER, { authorAssociation: undefined });
+    assert.equal(gate.latestDecision([noAssociation], NEW, DEFAULT_CONFIG, 'gpt'), null);
   });
 });
