@@ -1333,3 +1333,79 @@ describe('#231 powody wyniku są jedynym śladem w logu przebiegu', () => {
     assert.equal(gate.latestDecision([noAssociation], NEW, DEFAULT_CONFIG, 'gpt'), null);
   });
 });
+
+describe('#290 czytnik tabeli „Triage”: znaczniki zdejmowane do stanu stałego', () => {
+  const { triageTableRows, triageLabelFromTable, reconcileTriage, NEEDS_TRIAGE } = gate;
+  const plain = value => JSON.parse(JSON.stringify(value));
+  const komorka = (priorytet, ...przed) => '<h2>Triage</h2><table><tr><td>' + przed.join('') + 'priorytet</td><td>' + priorytet + '</td></tr></table>';
+  const rows = html => plain(triageTableRows(html));
+  // Zagnieżdżenie na `poziomy` poziomów: `<<b>b>` to poziom 1, `<<<b>b>b>` to poziom 2 itd.
+  const zagniezdzone = poziomy => {
+    let tekst = '<b>';
+    for (let i = 0; i < poziomy; i++) tekst = '<' + tekst + 'b>';
+    return tekst;
+  };
+
+  test('znacznik rozbity wewnętrznym znacznikiem daje ten sam wynik co treść bez obu', () => {
+    const czysta = rows(komorka('P1'));
+    assert.deepEqual(czysta, [['priorytet', 'P1']]);
+    for (const wstrzykniecie of ['<<b>b>', '<<<b>b>b>', '<<i>b>', '</<b>b>', '<<b>/b>']) {
+      assert.deepEqual(rows(komorka('P1' + wstrzykniecie)), czysta, wstrzykniecie);
+      assert.deepEqual(rows(komorka(wstrzykniecie + 'P1')), czysta, wstrzykniecie);
+    }
+  });
+
+  test('przekreślenie złożone przez usunięcie wewnętrznego znacznika nadal jest przekreśleniem', () => {
+    const czysta = rows(komorka('<del>P1</del> P2'));
+    assert.deepEqual(czysta, [['priorytet', 'P2']]);
+    for (const nazwa of ['del', 's', 'strike']) {
+      const rozbite = '<<b>' + nazwa + '>P1<</b>/' + nazwa + '> P2';
+      assert.deepEqual(rows(komorka(rozbite)), czysta, rozbite);
+    }
+    assert.equal(triageLabelFromTable(triageTableRows(komorka('<<b>del>P1<</b>/del> P2')), 'P'), 'P2');
+    // Znacznik złożony dopiero po usunięciu wewnętrznego może mieć atrybuty, wielkie litery i spację przed `>`.
+    for (const rozbite of ['<<b>del class="x" title=y>P1<</b>/del> P2', '<<b>DEL>P1<</b>/DEL> P2', '<<b>Strike>P1<</b>/strike > P2',
+      '<<b>s\tid=a>P1<</b>/S\n> P2']) {
+      assert.deepEqual(rows(komorka(rozbite)), czysta, rozbite);
+    }
+  });
+
+  test('treść bez zagnieżdżenia wychodzi tak jak dotąd: atrybuty, `>` w atrybucie, encje, przekreślenia', () => {
+    assert.deepEqual(rows(komorka('<strong class="x" title="a > b">P1</strong> &lt;b&gt; <del>P2</del> &amp;lt;')),
+      [['priorytet', 'P1 <b>  &lt;']]);
+    assert.deepEqual(rows('<h2 dir="auto">Tri<b>age</b></h2><table><tr><td>ryzyko</td><td>T2</td></tr></table>'), [['ryzyko', 'T2']]);
+  });
+
+  test('przekreślenie obejmuje całą treść z odstępami i nowymi liniami, pusta komórka jest pusta, encje są rozwijane', () => {
+    assert.deepEqual(rows(komorka('<del>P1 P3\n P4</del> P2')), [['priorytet', 'P2']]);
+    assert.deepEqual(rows(komorka('')), [['priorytet', '']]);
+    assert.deepEqual(rows(komorka('P1&nbsp;P2 &quot;x&quot; &#39;y&#39; &lt;&gt; &amp;')), [['priorytet', 'P1 P2 "x" \'y\' <> &']]);
+  });
+
+  test('zagnieżdżenie głębsze niż limit przebiegów: komórka i nagłówek bez tekstu, issue dostaje needs-triage', () => {
+    // Granica: 14 poziomów jest jeszcze zdejmowane, 15 nie (każdy poziom to przebieg, a ostatni potwierdza stan stały).
+    assert.deepEqual(rows(komorka('P1' + zagniezdzone(14))), [['priorytet', 'P1']], '14 poziomów');
+    assert.deepEqual(rows(komorka('P1' + zagniezdzone(15))), [['priorytet', '']], '15 poziomów');
+    assert.equal(triageLabelFromTable(triageTableRows(komorka('P1' + zagniezdzone(15))), 'P'), '');
+    // Nagłówek „Triage” z zagnieżdżeniem poza limitem nie otwiera sekcji, ale ten sam nagłówek w limicie tak.
+    const sekcja = glowa => '<h2>' + glowa + '</h2><table><tr><td>priorytet</td><td>P1</td></tr></table>';
+    assert.deepEqual(rows(sekcja('Triage' + zagniezdzone(14))), [['priorytet', 'P1']]);
+    assert.deepEqual(rows(sekcja('Triage' + zagniezdzone(15))), []);
+
+    const wejscie = bodyHtml => issue({
+      labels: [], createdAt: '2026-09-28T10:00:00Z', barrier: '2026-09-28T10:00:00Z', bodyHtml,
+      repoLabels: ['P1', 'T2', NEEDS_TRIAGE]
+    });
+    const tabela = priorytet => '<h2>Triage</h2><table><tr><td>priorytet</td><td>' + priorytet + '</td></tr>' +
+      '<tr><td>ryzyko</td><td>T2</td></tr></table>';
+    assert.deepEqual(plain(reconcileTriage(wejscie(tabela('P1'))).add), ['P1', 'T2']);
+    assert.deepEqual(plain(reconcileTriage(wejscie(tabela('P1' + zagniezdzone(15)))).add), ['T2', NEEDS_TRIAGE]);
+  });
+
+  test('ogromna treść z głębokim zagnieżdżeniem kończy się szybko i bez wyjątku', () => {
+    const start = Date.now();
+    const glebokie = '<'.repeat(20000) + '<b>' + 'b>'.repeat(20000);
+    assert.deepEqual(rows(komorka('P1' + glebokie)), [['priorytet', '']]);
+    assert.ok(Date.now() - start < 5000, 'limit przebiegów ogranicza koszt');
+  });
+});
