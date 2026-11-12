@@ -293,25 +293,21 @@ function stripAttributes(html) {
 /** Najwięcej przebiegów usuwania znaczników; głębsze zagnieżdżenie to wejście, którego nie czytamy. */
 const MAX_MARKUP_PASSES = 16;
 
-/** Jeden przebieg: bez atrybutów, bez treści przekreślonej, bez najbardziej wewnętrznych znaczników. */
-function stripMarkupOnce(html) {
-  return stripAttributes(html)
-    // Przekreślenie to wartość wycofana przez autora, nie druga wartość.
-    .replace(/<(del|s|strike)>[\s\S]*?<\/\1>/g, '')
-    .replace(/<[^<>]*>/g, '');
-}
-
 /**
- * Zdejmuje znaczniki aż do stanu stałego. Jeden przebieg zostawiałby znacznik
- * albo przekreślenie złożone przez usunięcie wewnętrznego (`<scr<b>ipt>`,
- * `<d<s>x</s>el>`), a wynik dla treści z takim zagnieżdżeniem różniłby się od
- * wyniku dla treści bez niego (CodeQL #2). Bez stanu stałego w limicie
- * przebiegów zwraca `null`.
+ * Zdejmuje znaczniki aż do stanu stałego. Jeden przebieg (bez atrybutów, bez treści
+ * przekreślonej, bez najbardziej wewnętrznych znaczników) zostawiałby znacznik albo
+ * przekreślenie złożone przez usunięcie wewnętrznego (`<<b>del>x<</b>/del>`), a wynik dla
+ * treści z takim zagnieżdżeniem różniłby się od wyniku dla treści bez niego (CodeQL #2).
+ * Usuwanie i pętla są w jednej funkcji, bo tylko takie powtarzanie CodeQL uznaje za
+ * czyszczenie do stanu stałego. Bez stanu stałego w limicie przebiegów zwraca `null`.
  */
 function stripMarkup(html) {
   let current = String(html || '');
   for (let pass = 0; pass < MAX_MARKUP_PASSES; pass++) {
-    const next = stripMarkupOnce(current);
+    const next = stripAttributes(current)
+      // Przekreślenie to wartość wycofana przez autora, nie druga wartość.
+      .replace(/<(del|s|strike)>[\s\S]*?<\/\1>/g, '')
+      .replace(/<[^<>]*>/g, '');
     if (next === current) return current;
     current = next;
   }
