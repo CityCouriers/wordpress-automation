@@ -298,16 +298,18 @@ const MAX_MARKUP_PASSES = 16;
  * przekreślonej, bez najbardziej wewnętrznych znaczników) zostawiałby znacznik albo
  * przekreślenie złożone przez usunięcie wewnętrznego (`<<b>del>x<</b>/del>`), a wynik dla
  * treści z takim zagnieżdżeniem różniłby się od wyniku dla treści bez niego (CodeQL #2).
- * Usuwanie i pętla są w jednej funkcji, bo tylko takie powtarzanie CodeQL uznaje za
- * czyszczenie do stanu stałego. Bez stanu stałego w limicie przebiegów zwraca `null`.
+ * Zmienna pętli zmienia się tylko przez `replace` na niej samej (atrybuty zdejmuje
+ * `stripAttributes` raz, przed pętlą), bo tylko takie powtarzanie CodeQL uznaje za
+ * czyszczenie do stanu stałego. Znacznik złożony dopiero w pętli może mieć atrybuty
+ * i wielkie litery, więc wzorzec przekreślenia je toleruje. Bez stanu stałego w limicie
+ * przebiegów zwraca `null`.
  */
 function stripMarkup(html) {
-  let current = String(html || '');
+  let current = stripAttributes(html);
   for (let pass = 0; pass < MAX_MARKUP_PASSES; pass++) {
-    current = stripAttributes(current);
     // Przekreślenie to wartość wycofana przez autora, nie druga wartość: pierwsza gałąź wzorca
     // zdejmuje je razem z treścią, druga zdejmuje pozostałe, najbardziej wewnętrzne znaczniki.
-    const next = current.replace(/<(del|s|strike)>[\s\S]*?<\/\1>|<[^<>]*>/g, '');
+    const next = current.replace(/<(del|s|strike)(?:\s[^<>]*)?>[\s\S]*?<\/\1\s*>|<[^<>]*>/gi, '');
     if (next === current) return current;
     current = next;
   }

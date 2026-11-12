@@ -1363,6 +1363,11 @@ describe('#290 czytnik tabeli „Triage”: znaczniki zdejmowane do stanu stałe
       assert.deepEqual(rows(komorka(rozbite)), czysta, rozbite);
     }
     assert.equal(triageLabelFromTable(triageTableRows(komorka('<<b>del>P1<</b>/del> P2')), 'P'), 'P2');
+    // Znacznik złożony dopiero po usunięciu wewnętrznego może mieć atrybuty, wielkie litery i spację przed `>`.
+    for (const rozbite of ['<<b>del class="x" title=y>P1<</b>/del> P2', '<<b>DEL>P1<</b>/DEL> P2', '<<b>Strike>P1<</b>/strike > P2',
+      '<<b>s\tid=a>P1<</b>/S\n> P2']) {
+      assert.deepEqual(rows(komorka(rozbite)), czysta, rozbite);
+    }
   });
 
   test('treść bez zagnieżdżenia wychodzi tak jak dotąd: atrybuty, `>` w atrybucie, encje, przekreślenia', () => {
