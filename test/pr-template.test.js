@@ -226,6 +226,18 @@ describe('#290 komentarze HTML usuwane do stanu stałego', () => {
     }
   });
 
+  test('pusta albo brakująca treść: jedna pusta sekcja wstępu, evaluate odrzuca ją jako pustą', () => {
+    for (const pusta of ['', undefined, null]) {
+      assert.deepEqual(splitSections(pusta), { _preamble: [''] });
+      assert.deepEqual(evaluate(pusta), { ok: false, problems: ['Treść PR-a jest pusta; wypełnij szablon.'] });
+    }
+  });
+
+  test('nagłówek musi stać na początku linii', () => {
+    assert.deepEqual(Object.keys(splitSections('tekst ## Links\n## Links\nFixes #1')), ['_preamble', 'links']);
+    assert.deepEqual(splitSections('tekst ## Links\n').links, undefined);
+  });
+
   test('komentarze obok siebie i w środku sekcji znikają, treść wokół zostaje', () => {
     const sections = splitSections('## Links\n\n<!-- a --> Fixes <!-- b -->#7<!-- c -->\n');
     assert.deepEqual(sections.links.join('\n').trim(), 'Fixes #7');

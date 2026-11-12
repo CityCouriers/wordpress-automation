@@ -1371,6 +1371,12 @@ describe('#290 czytnik tabeli „Triage”: znaczniki zdejmowane do stanu stałe
     assert.deepEqual(rows('<h2 dir="auto">Tri<b>age</b></h2><table><tr><td>ryzyko</td><td>T2</td></tr></table>'), [['ryzyko', 'T2']]);
   });
 
+  test('przekreślenie obejmuje całą treść z odstępami i nowymi liniami, pusta komórka jest pusta, encje są rozwijane', () => {
+    assert.deepEqual(rows(komorka('<del>P1 P3\n P4</del> P2')), [['priorytet', 'P2']]);
+    assert.deepEqual(rows(komorka('')), [['priorytet', '']]);
+    assert.deepEqual(rows(komorka('P1&nbsp;P2 &quot;x&quot; &#39;y&#39; &lt;&gt; &amp;')), [['priorytet', 'P1 P2 "x" \'y\' <> &']]);
+  });
+
   test('zagnieżdżenie głębsze niż limit przebiegów: komórka i nagłówek bez tekstu, issue dostaje needs-triage', () => {
     // Granica: 14 poziomów jest jeszcze zdejmowane, 15 nie (każdy poziom to przebieg, a ostatni potwierdza stan stały).
     assert.deepEqual(rows(komorka('P1' + zagniezdzone(14))), [['priorytet', 'P1']], '14 poziomów');

@@ -65,7 +65,7 @@ function splitSections(body) {
   let current = '_preamble';
   sections[current] = [];
   text.split(/\r?\n/).forEach(line => {
-    if (/^#{2,3}\s+/.test(line)) {
+    if (/^#{2,3}\s/.test(line)) {
       current = normalizeHeading(line);
       sections[current] = sections[current] || [];
       return;
