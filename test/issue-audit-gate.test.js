@@ -1386,7 +1386,9 @@ describe('#290 czytnik tabeli „Triage”: znaczniki zdejmowane do stanu stałe
     }
     // Przekreślenia o różnych nazwach, zagnieżdżone w dowolnej kolejności, także złożone dopiero w pętli.
     for (const przypadek of ['<del>a<s>b</s>P1</del> P2', '<s>a<strike>b<del>c</del>P3</strike>P1</s> P2', '<strike><del>P1</del></strike> P2',
-      '<<b>del>a<del>b</del>P1<</b>/del> P2']) {
+      '<<b>del>a<del>b</del>P1<</b>/del> P2',
+      // Wewnętrzne przekreślenie z atrybutami powstaje dopiero po usunięciu znacznika, gdy zewnętrzne już jest.
+      '<<b>del>a<<b>del class="x">b</del>c</del> P2', '<<b>s>a<<b>strike	id=y>b</strike>c</s> P2']) {
       assert.deepEqual(rows(komorka(przypadek)), czysta, przypadek);
     }
   });
@@ -1406,7 +1408,8 @@ describe('#290 czytnik tabeli „Triage”: znaczniki zdejmowane do stanu stałe
   });
 
   test('niedomknięte, nadmiarowe albo źle zagnieżdżone przekreślenie: komórka bez tekstu (fail-closed)', () => {
-    for (const przypadek of ['<del>P1', 'P1</del>', '<s>a</del>P1</s>', '<del>P1<s></del></s>', '<strike>P1<del>x</del>', '<del>P1</del></del>']) {
+    for (const przypadek of ['<del>P1', 'P1</del>', '<s>a</del>P1</s>', '<del>P1<s></del></s>', '<strike>P1<del>x</del>', '<del>P1</del></del>',
+      '<<b>del class="x">P1', 'P1<</b>/del class="x">', '<<b>s	id=y>P1']) {
       assert.deepEqual(rows(komorka(przypadek)), [['priorytet', '']], przypadek);
     }
   });

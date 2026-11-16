@@ -314,8 +314,8 @@ const MAX_MARKUP_PASSES = 16;
 function stripMarkup(html) {
   let current = stripAttributes(html);
   for (let pass = 0; pass < MAX_MARKUP_PASSES; pass++) {
-    const next = current.replace(/<(del|s|strike)(?:\s[^<>]*)?>(?:(?!<\/?(?:del|s|strike)(?:\s[^<>]*)?\s*>)[\s\S])*<\/\1\s*>|<(?!\/?(?:del|s|strike)(?:\s[^<>]*)?\s*>)[^<>]*>/gi, '');
-    if (next === current) return /<\/?(?:del|s|strike)(?:\s[^<>]*)?\s*>/i.test(current) ? null : current;
+    const next = current.replace(/<(del|s|strike)(?:\s[^<>]*)?>(?:(?!<\/?(?:del|s|strike)(?:\s[^<>]*)?>)[\s\S])*<\/\1\s*>|<(?!\/?(?:del|s|strike)(?:\s[^<>]*)?>)[^<>]*>/gi, '');
+    if (next === current) return /<\/?(?:del|s|strike)(?:\s[^<>]*)?>/i.test(current) ? null : current;
     current = next;
   }
   return null;
