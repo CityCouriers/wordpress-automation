@@ -1370,6 +1370,47 @@ describe('#290 czytnik tabeli „Triage”: znaczniki zdejmowane do stanu stałe
     }
   });
 
+  test('przekreślenie zagnieżdżone w przekreśleniu ukrywa całą zawartość zewnętrznego (del, s, strike, także z innymi znacznikami)', () => {
+    const czysta = [['priorytet', 'P2']];
+    for (const nazwa of ['del', 's', 'strike']) {
+      const otw = '<' + nazwa + '>';
+      const zam = '</' + nazwa + '>';
+      const przypadki = [
+        otw + otw + 'hidden' + zam + 'P1' + zam + ' P2',
+        otw + 'a' + otw + 'b' + otw + 'c' + zam + 'd' + zam + 'P1' + zam + ' P2',
+        otw + '<b>x</b>' + otw + 'hidden' + zam + '<i>P1</i>' + zam + ' P2',
+        otw + 'P1' + zam + otw + otw + 'x' + zam + 'P3' + zam + ' P2',
+        otw + '<a href="#x">P1' + otw + 'hidden' + zam + '</a>' + zam + ' P2'
+      ];
+      for (const przypadek of przypadki) assert.deepEqual(rows(komorka(przypadek)), czysta, przypadek);
+    }
+    // Przekreślenia o różnych nazwach, zagnieżdżone w dowolnej kolejności, także złożone dopiero w pętli.
+    for (const przypadek of ['<del>a<s>b</s>P1</del> P2', '<s>a<strike>b<del>c</del>P3</strike>P1</s> P2', '<strike><del>P1</del></strike> P2',
+      '<<b>del>a<del>b</del>P1<</b>/del> P2']) {
+      assert.deepEqual(rows(komorka(przypadek)), czysta, przypadek);
+    }
+  });
+
+  test('wycofana etykieta w zagnieżdżonym przekreśleniu nie trafia do etykiet issue (reconcileTriage)', () => {
+    const wejscie = priorytet => issue({
+      labels: [], createdAt: '2026-09-28T10:00:00Z', barrier: '2026-09-28T10:00:00Z',
+      bodyHtml: '<h2>Triage</h2><table><tr><td>priorytet</td><td>' + priorytet + '</td></tr><tr><td>ryzyko</td><td>T2</td></tr></table>',
+      repoLabels: ['P1', 'P2', 'T2', 'T3', NEEDS_TRIAGE]
+    });
+    for (const nazwa of ['del', 's', 'strike']) {
+      const otw = '<' + nazwa + '>';
+      const zam = '</' + nazwa + '>';
+      assert.deepEqual(plain(reconcileTriage(wejscie(otw + otw + 'hidden' + zam + 'P1' + zam)).add), ['T2', NEEDS_TRIAGE], nazwa + ': tylko wycofane P1');
+      assert.deepEqual(plain(reconcileTriage(wejscie(otw + otw + 'hidden' + zam + 'P1' + zam + ' <b>P2</b>')).add), ['P2', 'T2'], nazwa + ': P2 obok wycofanego P1');
+    }
+  });
+
+  test('niedomknięte, nadmiarowe albo źle zagnieżdżone przekreślenie: komórka bez tekstu (fail-closed)', () => {
+    for (const przypadek of ['<del>P1', 'P1</del>', '<s>a</del>P1</s>', '<del>P1<s></del></s>', '<strike>P1<del>x</del>', '<del>P1</del></del>']) {
+      assert.deepEqual(rows(komorka(przypadek)), [['priorytet', '']], przypadek);
+    }
+  });
+
   test('treść bez zagnieżdżenia wychodzi tak jak dotąd: atrybuty, `>` w atrybucie, encje, przekreślenia', () => {
     assert.deepEqual(rows(komorka('<strong class="x" title="a > b">P1</strong> &lt;b&gt; <del>P2</del> &amp;lt;')),
       [['priorytet', 'P1 <b>  &lt;']]);

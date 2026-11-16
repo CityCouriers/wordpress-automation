@@ -301,16 +301,21 @@ const MAX_MARKUP_PASSES = 16;
  * Zmienna pętli zmienia się tylko przez `replace` na niej samej (atrybuty zdejmuje
  * `stripAttributes` raz, przed pętlą), bo tylko takie powtarzanie CodeQL uznaje za
  * czyszczenie do stanu stałego. Znacznik złożony dopiero w pętli może mieć atrybuty
- * i wielkie litery, więc wzorzec przekreślenia je toleruje. Bez stanu stałego w limicie
- * przebiegów zwraca `null`.
+ * i wielkie litery, więc wzorce je tolerują.
+ *
+ * Przekreślenie to wartość wycofana przez autora, nie druga wartość, a przekreślenia
+ * się zagnieżdżają (`<del><del>x</del>P1</del>`: `P1` też jest wycofane). Dlatego pierwsza
+ * gałąź wzorca zdejmuje wyłącznie przekreślenie bez przekreślenia w środku (z treścią),
+ * a druga wszystkie znaczniki poza tymi z rodziny przekreśleń; zewnętrzne przekreślenie
+ * zostaje do kolejnego przebiegu, w którym jest już najbardziej wewnętrzne. Przekreślenie
+ * nadmiarowe, niedomknięte albo źle zagnieżdżone zostaje w wyniku do stanu stałego i jest
+ * wejściem do odrzucenia (`null`), tak samo jak brak stanu stałego w limicie przebiegów.
  */
 function stripMarkup(html) {
   let current = stripAttributes(html);
   for (let pass = 0; pass < MAX_MARKUP_PASSES; pass++) {
-    // Przekreślenie to wartość wycofana przez autora, nie druga wartość: pierwsza gałąź wzorca
-    // zdejmuje je razem z treścią, druga zdejmuje pozostałe, najbardziej wewnętrzne znaczniki.
-    const next = current.replace(/<(del|s|strike)(?:\s[^<>]*)?>[\s\S]*?<\/\1\s*>|<[^<>]*>/gi, '');
-    if (next === current) return current;
+    const next = current.replace(/<(del|s|strike)(?:\s[^<>]*)?>(?:(?!<\/?(?:del|s|strike)(?:\s[^<>]*)?\s*>)[\s\S])*<\/\1\s*>|<(?!\/?(?:del|s|strike)(?:\s[^<>]*)?\s*>)[^<>]*>/gi, '');
+    if (next === current) return /<\/?(?:del|s|strike)(?:\s[^<>]*)?\s*>/i.test(current) ? null : current;
     current = next;
   }
   return null;
