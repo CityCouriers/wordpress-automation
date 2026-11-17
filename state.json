@@ -1,0 +1,15 @@
+{
+  "sources": {
+    "zrodlo-1": {
+      "lastObservedState": "OK",
+      "lastObservedAt": "2026-11-18T09:00:00.000Z",
+      "lastNotifiedState": "OK",
+      "lastNotifiedAt": null,
+      "lastNotifiedKey": null,
+      "messageSeq": 0,
+      "eventId": null,
+      "undeliveredSince": null,
+      "lastSuccessfulCheckAt": "2026-11-18T09:00:00.000Z"
+    }
+  }
+}
