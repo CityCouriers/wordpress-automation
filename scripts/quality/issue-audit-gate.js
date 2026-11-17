@@ -290,12 +290,46 @@ function stripAttributes(html) {
     (match, slash, name) => '<' + slash + name.toLowerCase() + '>');
 }
 
-/** Tekst widoczny w kawałku HTML-a: bez znaczników, bez treści przekreślonej, z rozwiniętymi encjami. */
+/** Najwięcej przebiegów usuwania znaczników; głębsze zagnieżdżenie to wejście, którego nie czytamy. */
+const MAX_MARKUP_PASSES = 16;
+
+/**
+ * Zdejmuje znaczniki aż do stanu stałego. Jeden przebieg (bez atrybutów, bez treści
+ * przekreślonej, bez najbardziej wewnętrznych znaczników) zostawiałby znacznik albo
+ * przekreślenie złożone przez usunięcie wewnętrznego (`<<b>del>x<</b>/del>`), a wynik dla
+ * treści z takim zagnieżdżeniem różniłby się od wyniku dla treści bez niego (CodeQL #2).
+ * Zmienna pętli zmienia się tylko przez `replace` na niej samej (atrybuty zdejmuje
+ * `stripAttributes` raz, przed pętlą), bo tylko takie powtarzanie CodeQL uznaje za
+ * czyszczenie do stanu stałego. Znacznik złożony dopiero w pętli może mieć atrybuty
+ * i wielkie litery, więc wzorce je tolerują.
+ *
+ * Przekreślenie to wartość wycofana przez autora, nie druga wartość, a przekreślenia
+ * się zagnieżdżają (`<del><del>x</del>P1</del>`: `P1` też jest wycofane). Dlatego pierwsza
+ * gałąź wzorca zdejmuje wyłącznie przekreślenie bez przekreślenia w środku (z treścią),
+ * a druga wszystkie znaczniki poza tymi z rodziny przekreśleń; zewnętrzne przekreślenie
+ * zostaje do kolejnego przebiegu, w którym jest już najbardziej wewnętrzne. Przekreślenie
+ * nadmiarowe, niedomknięte albo źle zagnieżdżone zostaje w wyniku do stanu stałego i jest
+ * wejściem do odrzucenia (`null`), tak samo jak brak stanu stałego w limicie przebiegów.
+ */
+function stripMarkup(html) {
+  let current = stripAttributes(html);
+  for (let pass = 0; pass < MAX_MARKUP_PASSES; pass++) {
+    const next = current.replace(/<(del|s|strike)(?:\s[^<>]*)?>(?:(?!<\/?(?:del|s|strike)(?:\s[^<>]*)?>)[\s\S])*<\/\1\s*>|<(?!\/?(?:del|s|strike)(?:\s[^<>]*)?>)[^<>]*>/gi, '');
+    if (next === current) return /<\/?(?:del|s|strike)(?:\s[^<>]*)?>/i.test(current) ? null : current;
+    current = next;
+  }
+  return null;
+}
+
+/**
+ * Tekst widoczny w kawałku HTML-a: bez znaczników, bez treści przekreślonej, z rozwiniętymi encjami.
+ * Wejście zagnieżdżone głębiej niż limit przebiegów daje '' (fail-closed): nagłówek bez tekstu nie jest
+ * sekcją „Triage”, a komórka bez tekstu nie rozstrzyga etykiety, więc issue dostaje `needs-triage`.
+ */
 function htmlText(html) {
-  return stripAttributes(html)
-    // Przekreślenie to wartość wycofana przez autora, nie druga wartość.
-    .replace(/<(del|s|strike)>[\s\S]*?<\/\1>/g, '')
-    .replace(/<[^>]*>/g, '')
+  const visible = stripMarkup(html);
+  if (visible === null) return '';
+  return visible
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
