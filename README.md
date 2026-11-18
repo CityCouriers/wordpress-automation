@@ -26,7 +26,7 @@ Merge do `main` **niczego nie wdraża**. Publikacja wydania w GitHubie uruchamia
 - `Diagnostics.gs` — smoke test z menu, wyłącznie odczyt: Script Properties, zakładki, dostęp do GSC / GA4 / WordPressa, triggery, konfiguracja alertów, jedna linia raportu na krok.
 - `SheetCatalog.gs` — katalog arkuszy tworzonych przez skrypt: kolory zakładek, kolejność, generowany spis `START` i ukrywanie zakładek z danymi surowymi.
 - `Dates.gs` — `cachedFormatDate_`: formatowanie `Date` z pamięcią po `getTime()` dla pętli po dużych kolumnach dat (#229).
-- `Version.gs` — same placeholdery; workflow deployu nadpisuje go tagiem wydania, commitem i czasem przed `clasp push`, a arkusz pokazuje ten tag jako menu (*Szczegóły wdrożenia*). Drift check ignoruje ten plik.
+- `Version.gs` — same placeholdery; workflow deployu nadpisuje go tagiem wydania, commitem i czasem przed `clasp push`, a arkusz pokazuje ten tag jako menu (*Szczegóły wdrożenia*). Drift check porównuje ten plik w całości z kanonicznym zapisem wygenerowanym przez deploy, więc nie dopisuj tu kodu.
 - `eslint.config.js` — reguły lintu z globalnymi symbolami Apps Script.
 - `.claspignore` — do Apps Script trafiają wyłącznie `*.gs` i `appsscript.json`.
 
@@ -551,7 +551,7 @@ Normalna ścieżka to wydanie:
 2. Releases → otwórz draft przygotowany przez Release Drafter → *Publish release*. To tworzy tag `vX.Y.Z`.
 3. Actions → uruchomiony właśnie przebieg *Deploy to Apps Script* → *Review deployments* → zatwierdź `production`. Nic nie jest wypychane przed zatwierdzeniem.
 
-Workflow pobiera wydany tag, uruchamia lint i testy, wypisuje pliki, które clasp wypchnie, wykonuje `clasp push --force`, zapisuje niezmienną wersję Apps Script nazwaną od taga, a potem **weryfikuje żywy projekt**: pobiera projekt z powrotem i porównuje go z tagiem (`scripts/quality/apps-script-compare.js`, ten sam skrypt, którego używa drift check). Czerwony krok weryfikacji oznacza, że push już się odbył, ale projekt się różni; zbadaj to albo cofnij przez `deploy_ref`. Podsumowanie joba wypisuje wypchnięte pliki, wersję i wynik porównania. Pre-release'y są ignorowane.
+Workflow pobiera wydany tag, uruchamia lint i testy, wypisuje pliki, które clasp wypchnie, wykonuje `clasp push --force`, zapisuje niezmienną wersję Apps Script nazwaną od taga, a potem **weryfikuje żywy projekt**: pobiera projekt z powrotem i porównuje go z tagiem (`scripts/quality/apps-script-compare.js`, ten sam skrypt, którego używa drift check). Czerwony krok weryfikacji oznacza, że push już się odbył, ale projekt się różni; zbadaj to albo cofnij przez `deploy_ref`. Podsumowanie joba wypisuje wypchnięte pliki, wersję i wynik porównania. Tuż przed `clasp push` workflow zapisuje też jawny rekord wdrożenia (środowisko `apps-script-live`, opis w sekcji *Drift check*): `in_progress`, a po weryfikacji `success` albo `failure`. Pre-release'y są ignorowane.
 
 Wdrożenie doraźne bez wydania: Actions → *Deploy to Apps Script* → *Run workflow*, zostaw *Use workflow from* na `main`, zostaw *deploy_ref* jako `main`, opcjonalnie zaznacz *create_version* i zatwierdź tak samo.
 
@@ -565,7 +565,16 @@ clasp jest przypiętą zależnością deweloperską (`package-lock.json`), więc
 
 ## Drift check
 
-*Apps Script drift check* działa w każdy poniedziałek (i na żądanie). Pobiera żywy projekt i porównuje go z `main` przez `scripts/quality/apps-script-compare.js` (końcowe znaki nowej linii normalizowane po obu stronach: Apps Script zawsze zwraca plik z końcową nową linią, więc zacommitowane źródło bez niej nie jest driftem, a reguła ESLint `eol-last` trzyma takie pliki poza repozytorium; `Version.gs` ignorowany, porównywane tylko `*.gs` i `appsscript.json`). Jeśli ktoś edytował kod bezpośrednio w edytorze Apps Script, przebieg pada i dołącza patch z różnicami, żeby zmianę dało się wnieść z powrotem do repozytorium.
+*Apps Script drift check* działa w każdy poniedziałek (i na żądanie). Pobiera żywy projekt i porównuje go z rewizją **wdrożoną**, a nie z `main`: scalenie do `main` przed wdrożeniem, hotfix z `main` i rollback do starszego tagu nie są alarmem, jeśli żywy projekt zgadza się z tym, co faktycznie wdrożono (#297).
+
+- **Źródło rewizji.** Workflow wdrożenia zapisuje tuż przed `clasp push`, już po checkoucie wdrażanego refa, jawny rekord GitHub Deployments w środowisku `apps-script-live`: `ref` = pełny SHA faktycznie wypchniętego checkoutu (wynik `git rev-parse HEAD`, nie SHA zdarzenia uruchamiającego, więc rollback uruchomiony z `main` ma SHA taga), `payload.tag` = `deploy_ref` (`main` albo tag `v*`). Statusy: `in_progress` przed pushem, `success` dopiero po weryfikacji żywego projektu (#44), `failure` przy niepowodzeniu po pushu. Rekord zapisuje tylko token joba (`deployments: write`), więc edytor Apps Script ani edycja `Version.gs` go nie zmienią. Automatycznego rekordu środowiska `production` drift check nie czyta: opisuje kontekst uruchomienia workflow, nie checkout. Kod: `scripts/quality/deployment-record.js`.
+- **Czerwone** jest, gdy: brak rekordu (do pierwszego wdrożenia z tym krokiem albo zapisu bazowego nie ma dowodu, co jest wdrożone), najnowszy rekord nie ma statusu `success` (wdrożenie w toku, nieudane albo przerwane po pushu; nie cofamy się do starszego wdrożenia), tag/SHA są niespójne (przesunięty tag, SHA spoza `main`, niepoprawny wzorzec), plik żywego projektu różni się od rewizji (nowy, brakujący, zmieniony) albo `Version.gs` różni się od kanonicznego zapisu.
+- **`Version.gs`** jest porównywany w całości: parsowany bez wykonania, odtwarzany kanonicznie z czterech pól stempla (`tag`, `commit`, `deployedAt`, `deployedBy`), z wymogiem zgodności `tag` i `commit` z rekordem. Dopisany kod albo przepisanie stempla na starszą rewizję daje czerwone.
+- **Granica zaufania.** Kod narzędzia i `npm ci` pochodzą wyłącznie z `main`; porównywana rewizja jest czytana jako dane (`git ls-tree`, `git cat-file`), nic z niej nie jest wykonywane. Wejścia trafiają do skryptu przez `env`, nigdy przez interpolację w powłokę.
+- **`compare_ref`** (tylko `workflow_dispatch`) to tryb diagnostyczny: porównuje z podaną rewizją (`main`, tag `v*` albo pełny SHA), wynik jest oznaczony *DIAGNOSTYCZNY, nie zastępuje kontroli regularnej*, a bieg zaplanowany go nigdy nie czyta.
+- **Informacja.** Gdy najnowsze opublikowane wydanie jest inne niż wdrożony ref, przebieg wypisuje `::notice::`, nie awarię.
+
+Porównanie plików: końcowe znaki nowej linii są normalizowane po obu stronach (Apps Script zawsze zwraca plik z końcową nową linią, więc zacommitowane źródło bez niej nie jest driftem, a reguła ESLint `eol-last` trzyma takie pliki poza repozytorium); porównywane są tylko `*.gs` i `appsscript.json`. Jeśli ktoś edytował kod bezpośrednio w edytorze Apps Script, przebieg pada i dołącza patch z różnicami, żeby zmianę dało się wnieść z powrotem do repozytorium. Ręczne `deploy_ref=main` pozostaje wspierane (obsługuje je jawny rekord); ograniczenie drogi produkcyjnej do wydań to osobna decyzja właściciela.
 
 ## Wydania
 

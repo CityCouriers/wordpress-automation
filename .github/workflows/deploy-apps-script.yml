@@ -13,6 +13,12 @@ name: Deploy to Apps Script
 # run before any secret is exposed or any file is pushed, and lint must pass
 # before clasp push runs.
 #
+# #297: tuż przed `clasp push` workflow zapisuje jawny rekord GitHub Deployments
+# w środowisku `apps-script-live` (ref = pełny SHA faktycznie wypchniętego
+# checkoutu, payload.tag = DEPLOY_REF) i ustawia jego status: in_progress przed
+# pushem, success po weryfikacji z #44, failure po niepowodzeniu po pushu.
+# Tygodniowy drift check porównuje żywy projekt z rewizją z tego rekordu.
+#
 # Required repository secrets:
 #   CLASPRC_JSON    contents of ~/.clasprc.json after `clasp login`
 #   APPS_SCRIPT_ID  the Apps Script project id (Project settings → Script ID)
@@ -45,6 +51,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
+    # deployments: write wyłącznie dla zapisu rekordu wdrożenia (#297).
+    permissions:
+      contents: read
+      deployments: write
     env:
       # Released tag for release events; the deploy_ref input for manual runs.
       DEPLOY_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.deploy_ref }}
@@ -81,6 +91,7 @@ jobs:
           path: .deploy-tooling
           sparse-checkout: |
             scripts/quality/apps-script-compare.js
+            scripts/quality/deployment-record.js
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
@@ -177,6 +188,16 @@ jobs:
           rm -rf coverage  # test artefact from the gate step; ignored by clasp, but keeps the list readable
           { echo "## Deploy ${DEPLOY_REF} ($(git rev-parse --short HEAD))"; echo; echo '```'; npx clasp status; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # #297: rekord powstaje po checkoucie, więc jego ref to wynik
+      # `git rev-parse HEAD` wdrażanego refa (nie SHA zdarzenia uruchamiającego:
+      # rollback uruchomiony z main ma inny). Zawiedzie tu zapis, wdrożenie staje
+      # przed pushem (fail-closed), nic nie jest wypchnięte.
+      - name: Record deployment (in_progress)
+        id: deploy_record
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .deploy-tooling/scripts/quality/deployment-record.js start
+
       - name: Push to Apps Script
         run: npx clasp push --force
 
@@ -193,7 +214,19 @@ jobs:
       # at the next weekly drift check. The push already happened: a red step
       # here means "investigate or roll back with deploy_ref", not "retry".
       - name: Verify the live project matches ${{ env.DEPLOY_REF }}
+        id: verify
         run: node .deploy-tooling/scripts/quality/apps-script-compare.js --cwd . --label "$DEPLOY_REF"
+
+      # #297: status końcowy rekordu. Po pushu wszystko poza udaną weryfikacją
+      # (porażka pushu, wersji, porównania, anulowanie) daje failure; padnięty
+      # runner zostawia in_progress, które drift check też traktuje jako czerwone.
+      - name: Record deployment result
+        if: always() && steps.deploy_record.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_RECORD_ID: ${{ steps.deploy_record.outputs.id }}
+          DEPLOY_RESULT: ${{ steps.verify.outcome == 'success' && 'success' || 'failure' }}
+        run: node .deploy-tooling/scripts/quality/deployment-record.js finish --id "$DEPLOY_RECORD_ID" --state "$DEPLOY_RESULT"
 
       - name: Remove credentials
         if: always()

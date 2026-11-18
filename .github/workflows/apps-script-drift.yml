@@ -1,8 +1,21 @@
 name: Apps Script drift check
 
-# Detects edits made directly in the Apps Script editor that never went
-# through this repository. Pulls the live project and compares it with `main`.
-# Fails (and attaches the diff) when the two differ.
+# Wykrywa zmiany w żywym projekcie Apps Script, których nie wprowadziło wdrożenie
+# z tego repozytorium (edycja w edytorze Apps Script, ręczny `clasp push`) albo
+# ostatnie wdrożenie, które nie zakończyło się poprawnie. Pobiera żywy projekt i
+# porównuje go z rewizją WDROŻONĄ, nie z `main`: scalenie do `main` przed
+# wdrożeniem, hotfix z `main` i rollback do starszego tagu nie są alarmem.
+#
+# Rewizję wskazuje najnowszy jawny rekord GitHub Deployments środowiska
+# `apps-script-live` (ref = pełny SHA checkoutu, payload.tag = DEPLOY_REF), który
+# zapisuje wyłącznie workflow wdrożenia (#297). Brak rekordu, status inny niż
+# success, niespójny tag/SHA albo różnica w plikach (w tym w całym Version.gs)
+# to czerwone. Ręczne `compare_ref` to tryb DIAGNOSTYCZNY: porównuje z podaną
+# rewizją jako danymi i nie zastępuje kontroli regularnej; bieg zaplanowany
+# go nigdy nie czyta.
+#
+# Granica zaufania: kod narzędzia i `npm ci` pochodzą wyłącznie z `main`;
+# porównywana rewizja jest czytana jako dane (`git show`), nigdy wykonywana.
 #
 # Uses the same repository secrets as the deploy workflow.
 
@@ -12,25 +25,27 @@ on:
   workflow_dispatch:
     inputs:
       compare_ref:
-        description: "Z czym porównać żywy projekt: main (domyślnie) albo gałąź, np. przy zmianie układu źródeł"
+        description: "DIAGNOSTYCZNIE (nie zastępuje kontroli regularnej): porównaj z rewizją main, tagiem v* albo pełnym SHA zamiast z wdrożoną rewizją z rekordu Deployments. Puste = kontrola regularna"
         type: string
-        default: main
+        default: ""
 
 permissions:
   contents: read
+  deployments: read
 
 jobs:
   drift:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Domyślnie main. Możliwość wskazania gałęzi jest potrzebna, gdy zmiana
-      # dotyka układu źródeł albo samego porównania: bez tego nie da się jej
-      # sprawdzić przed merge'em, a to jedyny dowód, że clasp widzi to samo.
-      - name: Checkout ${{ inputs.compare_ref || 'main' }}
+      # Kod narzędzia, package-lock.json i historia (tagi, przodkowie main) tylko
+      # z main. Wejście compare_ref nie steruje checkoutem.
+      - name: Checkout main
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.compare_ref || 'main' }}
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -42,6 +57,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Żywy projekt trafia do czystego katalogu live/: pliki z main nie mogą
+      # udawać plików żywego projektu.
       - name: Configure clasp credentials
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
@@ -53,17 +70,18 @@ jobs:
           : "${APPS_SCRIPT_ID:?Missing APPS_SCRIPT_ID repository secret}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          mkdir -p live
           # scriptExtensions keeps clasp 3 on .gs (its default is .js).
-          # Ten sam mechanizm co w deployu: src/ od #105, katalog główny wcześniej.
-          if [ -f src/appsscript.json ]; then ROOT_DIR=src; else ROOT_DIR=.; fi
-          echo "clasp rootDir: $ROOT_DIR"
-          printf '{"scriptId":"%s","rootDir":"%s","scriptExtensions":["gs"]}\n' "$APPS_SCRIPT_ID" "$ROOT_DIR" > .clasp.json
+          printf '{"scriptId":"%s","rootDir":".","scriptExtensions":["gs"]}\n' "$APPS_SCRIPT_ID" > live/.clasp.json
 
-      # Shared with the deploy workflow: clasp pull, trailing-newline
-      # normalisation, Version.gs restored from git, git status limited to the
-      # sources. See scripts/quality/apps-script-compare.js (unit-tested).
-      - name: Pull live project and compare with ${{ inputs.compare_ref || 'main' }}
-        run: node scripts/quality/apps-script-compare.js --label "${{ inputs.compare_ref || 'main' }}" --patch apps-script-drift.patch
+      # Logika w scripts/quality/apps-script-compare.js (testowana jednostkowo):
+      # odczyt rekordu, spójność tag/SHA, drzewo rewizji jako dane, porównanie.
+      # Wejścia tylko przez env, bez interpolacji w powłokę.
+      - name: Pull live project and compare with the deployed revision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPARE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.compare_ref || '' }}
+        run: node scripts/quality/apps-script-compare.js --drift --cwd live --repo-dir . --patch apps-script-drift.patch
 
       - name: Upload drift patch
         if: failure()
@@ -76,4 +94,4 @@ jobs:
 
       - name: Remove credentials
         if: always()
-        run: rm -f "$HOME/.clasprc.json" .clasp.json
+        run: rm -f "$HOME/.clasprc.json" live/.clasp.json

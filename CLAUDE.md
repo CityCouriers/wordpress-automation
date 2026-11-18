@@ -117,7 +117,7 @@ skryptach przechodzą na polski przy okazji kolejnych zmian, bez masowego tłuma
 6. Publikacja draftu Release Draftera wdraża tag do Apps Script po zatwierdzeniu środowiska
    `production` przez właściciela. Rollback: uruchom *Deploy to Apps Script* z `deploy_ref=<tag>`.
    Deploy czerwony wyłącznie na kroku weryfikacji: uruchom ręcznie *Apps Script drift check*
-   i pobierz artefakt z patchem, zanim cokolwiek zmienisz.
+   i pobierz artefakt z patchem, zanim cokolwiek zmienisz. Drift porównuje z rewizją z jawnego rekordu Deployments (`apps-script-live`), który zapisuje krok deployu; czerwone „brak dowodu wdrożenia” oznacza brak rekordu, nie rozjazd (#297).
 
 ## Bramki jakości
 

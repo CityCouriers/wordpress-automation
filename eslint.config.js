@@ -45,6 +45,7 @@ module.exports = [
         console: "readonly",
         Buffer: "readonly",
         URL: "readonly",
+        fetch: "readonly",
       },
     },
     rules: {

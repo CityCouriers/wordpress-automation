@@ -17,6 +17,10 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { stripGitEnv } = require('./helpers/git-env');
+
+// Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
+stripGitEnv();
 
 const gate = require('../scripts/quality/coverage-gate.js');
 const roots = [];

@@ -9,6 +9,10 @@
 const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync, execFileSync } = require('child_process');
+const { stripGitEnv } = require('./helpers/git-env');
+
+// Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
+stripGitEnv();
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -175,5 +179,187 @@ describe('apps-script-compare', () => {
     const r = run(root, fake);
     assert.equal(r.status, 1);
     assert.match(r.out, /\[apps-script-compare\] FAIL: Pull failed/);
+  });
+});
+
+/**
+ * Kontrola zerowa mutacyjna (#297): testy dopisane przed zmianą skryptu, żeby zabić
+ * mutanty ocalałe w kodzie sprzed zmiany (Stryker, 274 mutanty, 78 ocalałych).
+ */
+describe('apps-script-compare: kontrola zerowa', () => {
+  const git = (root, args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+
+  /** Uruchomienie z rozdzielonym stdout/stderr, dowolnymi argumentami i opcjami procesu. */
+  function raw(root, fake, args, { env = {}, spawn = {}, pull = `"${process.execPath}" "${fake}"`, summary = true } = {}) {
+    const summaryFile = path.join(root, 'summary.md');
+    const full = { ...process.env, APPS_SCRIPT_PULL_CMD: pull, GITHUB_STEP_SUMMARY: summaryFile, ...env };
+    if (!summary) delete full.GITHUB_STEP_SUMMARY;
+    if (pull === null) delete full.APPS_SCRIPT_PULL_CMD;
+    const r = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: full, ...spawn });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, summary: fs.existsSync(summaryFile) ? fs.readFileSync(summaryFile, 'utf8') : null };
+  }
+
+  test('domyślne wartości: etykieta, brak patcha i katalog bieżący', () => {
+    const { root, fake } = repo('');
+    const r = raw(root, fake, [], { spawn: { cwd: root } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '✅ Apps Script matches the checked-out ref.\n\n```\nPulled files.\n```\n');
+    const d = repo("fs.writeFileSync('GA4.gs', 'x\\n');");
+    const r2 = raw(d.root, d.fake, [], { spawn: { cwd: d.root } });
+    assert.equal(r2.status, 1);
+    assert.match(r2.stdout, /❌ Apps Script differs from the checked-out ref:/);
+    assert.doesNotMatch(r2.stdout, /Patch saved/, 'bez --patch nic nie jest zapisywane');
+    assert.deepEqual(fs.readdirSync(d.root).filter(f => /\.patch$/.test(f)), []);
+    assert.match(r2.stderr, /::error::Apps Script project differs from the checked-out ref\. See the job summary\.\n/);
+  });
+
+  test('dokładne podsumowanie: zgodny projekt, różnica z patchem, brak zmiennej GITHUB_STEP_SUMMARY', () => {
+    const ok = repo('');
+    assert.equal(raw(ok.root, ok.fake, ['--cwd', ok.root, '--label', 'v1']).summary, '✅ Apps Script matches v1.\n\n```\nPulled files.\n```\n');
+    const d = repo("fs.writeFileSync('GA4.gs', 'x\\n');");
+    const r = raw(d.root, d.fake, ['--cwd', d.root, '--label', 'v1', '--patch', 'p.patch']);
+    assert.equal(r.summary, '❌ Apps Script differs from v1:\n\n```\n M GA4.gs\n```\nPatch saved to p.patch.\n');
+    assert.equal(r.stdout, '❌ Apps Script differs from v1:\n\n```\n M GA4.gs\n```\nPatch saved to p.patch.\n');
+    const none = raw(ok.root, ok.fake, ['--cwd', ok.root], { summary: false });
+    assert.equal(none.status, 0, none.stderr);
+  });
+
+  test('milczące pobranie nie dokleja bloku z wynikiem pobrania', () => {
+    const { root, fake } = repo('');
+    const r = raw(root, fake, ['--cwd', root, '--label', 'v1'], { pull: `"${process.execPath}" -e ""` });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '✅ Apps Script matches v1.\n');
+  });
+
+  test('flagi: brak wartości (także gdy kolejny argument jest flagą) i nieznany argument', () => {
+    const { root, fake } = repo('');
+    for (const flag of ['--label', '--patch', '--cwd']) {
+      assert.match(raw(root, fake, [flag]).stderr, new RegExp(`FAIL: ${flag} requires a value`));
+      assert.match(raw(root, fake, [flag, '--label', 'x']).stderr, new RegExp(`FAIL: ${flag} requires a value`));
+    }
+    assert.match(raw(root, fake, ['--bogus']).stderr, /FAIL: Unknown argument: --bogus/);
+    assert.match(raw(root, fake, ['--cwd', root, '--bogus', 'x']).stderr, /FAIL: Unknown argument: --bogus/);
+  });
+
+  test('--cwd i --patch trafiają do właściwych pól (patch względem --cwd)', () => {
+    const { root, fake } = repo("fs.writeFileSync('GA4.gs', 'x\\n');");
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-other-'));
+    roots.push(other);
+    const r = raw(root, fake, ['--patch', 'out.patch', '--cwd', root], { spawn: { cwd: other } });
+    assert.equal(r.status, 1);
+    assert.ok(fs.existsSync(path.join(root, 'out.patch')));
+    assert.deepEqual(fs.readdirSync(other), []);
+  });
+
+  test('porażka pobrania: komunikat z poleceniem i stderr (przed stdout), bez dodatkowych białych znaków', () => {
+    const cmdOf = fake => `"${process.execPath}" "${fake}"`;
+    const a = repo("console.error('BLAD'); console.log('WYJSCIE'); process.exit(3);");
+    const r = raw(a.root, a.fake, ['--cwd', a.root]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr, `\n[apps-script-compare] FAIL: Pull failed (${cmdOf(a.fake)}): BLAD\n`);
+    const b = repo("console.log('WYJSCIE'); process.exit(3);");
+    assert.equal(raw(b.root, b.fake, ['--cwd', b.root]).stderr, `\n[apps-script-compare] FAIL: Pull failed (${cmdOf(b.fake)}): WYJSCIE\n`);
+    const c = repo('process.exit(3);');
+    assert.equal(raw(c.root, c.fake, ['--cwd', c.root]).stderr, `\n[apps-script-compare] FAIL: Pull failed (${cmdOf(c.fake)}): \n`);
+  });
+
+  test('błąd uruchomienia pobrania (np. brak katalogu) jest zgłoszony z przyczyną systemową', () => {
+    const { root, fake } = repo('');
+    const r = raw(root, fake, ['--cwd', path.join(root, 'nie-ma-takiego')]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /FAIL: Pull failed \(.+\): spawnSync .*ENOENT/);
+  });
+
+  test('bez APPS_SCRIPT_PULL_CMD uruchamia `npx clasp pull` w katalogu --cwd', () => {
+    const { root, fake } = repo('');
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-bin-'));
+    roots.push(bin);
+    const fakeNpx = (okBody, winBody) => {
+      if (process.platform === 'win32') fs.writeFileSync(path.join(bin, 'npx.cmd'), winBody);
+      else fs.writeFileSync(path.join(bin, 'npx'), okBody, { mode: 0o755 });
+    };
+    fakeNpx('#!/bin/sh\necho FAKE-NPX "$@"\n', '@echo off\r\necho FAKE-NPX %*\r\n');
+    const env = { PATH: bin + path.delimiter + process.env.PATH };
+    const r = raw(root, fake, ['--cwd', root, '--label', 'v1'], { pull: null, env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '✅ Apps Script matches v1.\n\n```\nFAKE-NPX clasp pull\n```\n');
+    fakeNpx('#!/bin/sh\necho BLAD >&2\nexit 4\n', '@echo off\r\necho BLAD 1>&2\r\nexit /b 4\r\n');
+    const bad = raw(root, fake, ['--cwd', root], { pull: null, env });
+    // Node 24 dopisuje do stderr ostrzeżenie DEP0190 (shell + argumenty), więc sprawdzamy końcówkę.
+    assert.ok(bad.stderr.endsWith('\n[apps-script-compare] FAIL: Pull failed (npx clasp pull): BLAD\n'), bad.stderr);
+  });
+
+  test('układ: katalog src bez appsscript.json nie jest układem src', () => {
+    const { root, fake } = repo("fs.writeFileSync('GA4.gs', 'function b() { return 1; }\\n');");
+    fs.mkdirSync(path.join(root, 'src'));
+    fs.writeFileSync(path.join(root, 'src', 'notatki.txt'), 'x');
+    const r = raw(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 1, 'źródła w katalogu głównym są porównywane mimo obcego katalogu src/');
+    assert.match(r.stdout, / M GA4\.gs/);
+  });
+
+  test('pliki o rozszerzeniu zawierającym .gs nie są źródłami i nie dostają końcowej nowej linii', () => {
+    const { root, fake } = repo("fs.writeFileSync('Kod.gs.bak', 'bez nowej linii');");
+    const r = raw(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(fs.readFileSync(path.join(root, 'Kod.gs.bak'), 'utf8'), 'bez nowej linii');
+  });
+
+  test('pusty zacommitowany plik, który żywy projekt zwraca z nową linią, jest driftem', () => {
+    const { root, fake } = repo("fs.writeFileSync('Pusty.gs', '\\n');");
+    fs.writeFileSync(path.join(root, 'Pusty.gs'), '');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'pusty']);
+    const r = raw(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, / M Pusty\.gs/);
+  });
+
+  test('dodatkowa pusta linia na końcu pliku z końcową nową linią jest driftem', () => {
+    const { root, fake } = repo("fs.writeFileSync('Kod.gs', 'function a() {}\\n\\n');");
+    const r = raw(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, / M Kod\.gs/);
+  });
+
+  test('nazwa pliku z wiodącą spacją nie jest normalizowana przez przycięcie nazwy', { skip: process.platform === 'win32' }, () => {
+    const { root, fake } = repo("fs.writeFileSync(' Spacja.gs', 'x\\n');");
+    fs.writeFileSync(path.join(root, ' Spacja.gs'), 'x');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-q', '-m', 'spacja']);
+    const r = raw(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+  });
+
+  test('eksporty modułu: compare i normalizacje, a samo wczytanie modułu niczego nie uruchamia', () => {
+    const m = require(SCRIPT);
+    assert.equal(typeof m.compare, 'function');
+    assert.equal(typeof m.normalizeTrailingNewline, 'function');
+    assert.equal(typeof m.normalizeIndexTrailingNewline, 'function');
+    const { root } = repo('');
+    assert.deepEqual(m.compare(root), { changes: '', patch: '' });
+  });
+
+  test('nieśledzony plik obok zmienionego: patch zawiera oba, a indeks zostaje czysty', () => {
+    const { root, fake } = repo("fs.writeFileSync('GA4.gs', 'function b() { return 1; }\\n'); fs.writeFileSync('Extra.gs', 'function e() {}\\n');");
+    const r = raw(root, fake, ['--cwd', root, '--patch', 'd.patch']);
+    assert.equal(r.status, 1);
+    const patch = fs.readFileSync(path.join(root, 'd.patch'), 'utf8');
+    assert.match(patch, /\+function b\(\) \{ return 1; \}/);
+    assert.match(patch, /\+function e\(\) \{\}/);
+    assert.equal(git(root, ['diff', '--cached', '--name-only']), '', 'indeks bez zmian po przebiegu');
+  });
+});
+
+
+describe('apps-script-compare: układ src ogranicza porównanie do plików źródłowych', () => {
+  test('zmieniony śledzony plik niebędący źródłem w src/ nie jest driftem', () => {
+    const { root, fake } = repo("fs.writeFileSync('src/notes.txt', 'zmienione\\n');", 'src');
+    fs.writeFileSync(path.join(root, 'src', 'notes.txt'), 'oryginal\n');
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'notes'], { cwd: root });
+    const r = run(root, fake);
+    assert.equal(r.status, 0, r.out);
+    assert.doesNotMatch(r.out, /notes\.txt/);
   });
 });
