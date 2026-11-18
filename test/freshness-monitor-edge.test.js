@@ -176,6 +176,20 @@ describe('#295 protokół: brzegi', () => {
     assert.equal(reminder.eventId, `${LABEL}#3`);
   });
 
+  test('chwila oceny jest brana po odczycie: znacznik, który pojawił się w czasie ponowienia, nie jest „z przyszłości”', async () => {
+    let current = now;
+    const { result, deps } = await run({
+      reader: createReader(new Error('chwilowy błąd'), '2026-11-18 10:00:30'),
+      clock: () => current,
+      sleep: async ms => { current = new Date(current.getTime() + ms); }
+    });
+    assert.equal(result.alertLevel, 'OK');
+    assert.equal(result.assessment.rawState, 'ACTIVE');
+    assert.equal(result.assessment.ageSeconds, 30);
+    assert.equal(deps.sender.calls, 0);
+    assert.match(deps.lines[0], / przebieg=2026-11-18T09:01:00\.000Z$/);
+  });
+
   test('stan OK po powrocie nie dostaje „przypomnienia” mimo dawnej wiadomości', async () => {
     const store = createStore(notifiedState('OK'));
     const { deps, result } = await run({ store, reader: createReader('2026-11-23 11:00:00'), clock: () => at('2026-11-23 12:00:00') });

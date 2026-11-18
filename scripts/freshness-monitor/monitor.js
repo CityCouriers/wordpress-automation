@@ -180,9 +180,11 @@ async function runCheck({ config, clock, reader, store, sender, sleep, log }) {
     log(`[${config.label}] problem=STATE_READ_FAILED`);
     return finish(result);
   }
+  // Chwila oceny po odczycie: znacznik, który pojawił się podczas ponowienia, nie może wyglądać na pochodzący z przyszłości.
+  const read = await readMarker(reader, config, sleep);
   const now = clock();
   const nowIso = now.toISOString();
-  const assessment = assess({ read: await readMarker(reader, config, sleep), now, config });
+  const assessment = assess({ read, now, config });
   result.alertLevel = assessment.alertLevel;
   result.assessment = assessment;
   log(statusLine(config, assessment, nowIso, snapshot.source.eventId));
