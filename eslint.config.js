@@ -45,6 +45,10 @@ module.exports = [
         console: "readonly",
         Buffer: "readonly",
         URL: "readonly",
+        // Node >= 20: odczyt i wysyłka sprawdzacza świeżości (#295) używają wbudowanego fetch.
+        fetch: "readonly",
+        AbortSignal: "readonly",
+        setTimeout: "readonly",
       },
     },
     rules: {
