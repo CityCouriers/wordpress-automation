@@ -1,0 +1,11 @@
+# Wyjątki skanera sekretów (gitleaks, job `secret-scan`). Jeden wpis to odcisk jednego znaleziska
+# w jednym commicie (`commit:plik:reguła:linia`); nad wpisem stoi komentarz z powodem i numerem zgłoszenia.
+# Listy pilnuje test/secret-scan.test.js: kolejny wyjątek wymaga zmiany tego testu.
+
+# #303: syntetyczny ciąg w fixture testu redakcji logu, nie poświadczenie. Commit jest tylko na gałęzi
+# fix/275-adnotacja-znacznika (PR #289 zamknięty bez scalenia, zastąpiony przez #291).
+ba32ceec7bb17fcd85b684a6ef7a0b54a4a73992:test/run-marker-annotation.test.js:generic-api-key:163
+
+# #303: ten sam syntetyczny ciąg w fixture testu redakcji logu. Commit jest tylko na gałęzi
+# test/287-status-splata (niescalona praca do #287).
+b3439697fb361d26e792cadf362a27a7b6d54e00:test/run-marker-annotation.test.js:generic-api-key:163
