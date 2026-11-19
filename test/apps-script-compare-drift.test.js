@@ -8,12 +8,12 @@
 
 const { test, describe, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 const { stripGitEnv } = require('./helpers/git-env');
+const { runNode } = require('./helpers/node-child');
 
 // Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
 stripGitEnv();
@@ -51,16 +51,8 @@ const tmp = prefix => {
   return d;
 };
 
-function exec(script, args, { env, cwd }) {
-  return new Promise(resolve => {
-    const child = spawn(process.execPath, [script, ...args], { env, cwd });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', c => { stdout += c; });
-    child.stderr.on('data', c => { stderr += c; });
-    child.on('close', status => resolve({ status, stdout, stderr }));
-  });
-}
+// Tymczasowa diagnostyka P1 (#297): ślad przy nietypowym wyjściu potomka, patrz test/helpers/node-child.js.
+const exec = runNode;
 
 /** Żywy projekt = pliki z `files` w katalogu, który podstawione pobranie kopiuje do --cwd. */
 function liveDirOf(files) {

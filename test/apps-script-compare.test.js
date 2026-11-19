@@ -8,8 +8,9 @@
 
 const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { stripGitEnv } = require('./helpers/git-env');
+const { runNodeSync } = require('./helpers/node-child');
 
 // Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
 stripGitEnv();
@@ -52,7 +53,7 @@ function repo(fakePullBody, dir) {
 
 function run(root, fake, extraArgs = [], env = {}) {
   const summary = path.join(root, 'summary.md');
-  const r = spawnSync(process.execPath, [SCRIPT, '--cwd', root, '--label', 'v9.9.9', ...extraArgs], {
+  const r = runNodeSync(SCRIPT, ['--cwd', root, '--label', 'v9.9.9', ...extraArgs], {
     encoding: 'utf8',
     env: { ...process.env, APPS_SCRIPT_PULL_CMD: `"${process.execPath}" "${fake}"`, GITHUB_STEP_SUMMARY: summary, ...env }
   });
@@ -169,7 +170,7 @@ describe('apps-script-compare', () => {
 
   test('a flag without a value fails fast with a clear message', () => {
     const { root, fake } = repo('');
-    const r = spawnSync(process.execPath, [SCRIPT, '--cwd', root, '--label'], { encoding: 'utf8', env: { ...process.env, APPS_SCRIPT_PULL_CMD: `"${process.execPath}" "${fake}"` } });
+    const r = runNodeSync(SCRIPT, ['--cwd', root, '--label'], { encoding: 'utf8', env: { ...process.env, APPS_SCRIPT_PULL_CMD: `"${process.execPath}" "${fake}"` } });
     assert.equal(r.status, 1);
     assert.match(r.stderr, /--label requires a value/);
   });
@@ -195,7 +196,7 @@ describe('apps-script-compare: kontrola zerowa', () => {
     const full = { ...process.env, APPS_SCRIPT_PULL_CMD: pull, GITHUB_STEP_SUMMARY: summaryFile, ...env };
     if (!summary) delete full.GITHUB_STEP_SUMMARY;
     if (pull === null) delete full.APPS_SCRIPT_PULL_CMD;
-    const r = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: full, ...spawn });
+    const r = runNodeSync(SCRIPT, [...args], { encoding: 'utf8', env: full, ...spawn });
     return { status: r.status, stdout: r.stdout, stderr: r.stderr, summary: fs.existsSync(summaryFile) ? fs.readFileSync(summaryFile, 'utf8') : null };
   }
 

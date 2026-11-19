@@ -9,12 +9,13 @@
 
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
 const { stripGitEnv } = require('./helpers/git-env');
+const { runNode } = require('./helpers/node-child');
 
 // Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
 stripGitEnv();
@@ -35,14 +36,8 @@ after(async () => {
 
 /** Asynchronicznie: spawnSync zablokowałby pętlę zdarzeń i serwer w tym procesie nie odpowiedziałby. */
 function runCli(args, { env, cwd } = {}) {
-  return new Promise(resolve => {
-    const child = spawn(process.execPath, [SCRIPT, ...args], { env, cwd });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', c => { stdout += c; });
-    child.stderr.on('data', c => { stderr += c; });
-    child.on('close', status => resolve({ status, stdout, stderr }));
-  });
+  // Tymczasowa diagnostyka P1 (#297): ślad przy nietypowym wyjściu potomka, patrz test/helpers/node-child.js.
+  return runNode(SCRIPT, args, { env, cwd });
 }
 
 function reset() {
