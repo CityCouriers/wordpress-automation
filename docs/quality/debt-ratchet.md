@@ -126,7 +126,7 @@ liczenia, nie z nowego długu.
 ## Uruchamianie
 
 ```
-npm run quality:debt -- --mode=report --base=origin/main     # lokalnie, jak w hooku
+npm run quality:debt -- --mode=enforce --base=origin/main     # lokalnie, jak w hooku
 node scripts/quality/debt-ratchet.js write-baseline          # zapis bazy z bieżącego kodu
 ```
 
@@ -138,11 +138,12 @@ a spadek miary i spłacony dług są czerwone.
 
 ## Podpięcie
 
-- **CI:** krok `Debt ratchet (report)` w jobie `validate` po lincie (`.github/workflows/ci.yml`); w PR z `--base` =
+- **CI:** krok `Debt ratchet` (`--mode=enforce`) w jobie `validate` po lincie (`.github/workflows/ci.yml`); w PR z `--base` =
   SHA bazowy, na push do `main` bez porównania.
-- **Hook:** `.githooks/pre-commit` uruchamia raport, gdy w indeksie są `src/*.gs`, `scripts/quality/*` albo pliki
+- **Hook:** `.githooks/pre-commit` uruchamia zapadkę (`--mode=enforce`), gdy w indeksie są `src/*.gs`, `scripts/quality/*` albo pliki
   `.quality/debt-*`.
-- **Tryb:** do czasu przełączenia (osobny PR po przeglądzie wyniku) tylko raport; krok nie blokuje scalenia.
+- **Tryb:** blokada (`--mode=enforce`) w CI i w hooku (#240): czerwony wynik zatrzymuje job `validate` i commit. `--mode=report`
+  zostaje w silniku do użytku ręcznego (diagnoza bez kodu 1). Podpięcie pilnuje `test/debt-ratchet-wiring.test.js`.
 
 ## Ograniczenia
 
