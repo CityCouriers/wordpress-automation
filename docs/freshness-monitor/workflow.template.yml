@@ -1,0 +1,58 @@
+# SZABLON workflow sprawdzacza świeżości (#295). NIE jest to workflow tego repozytorium.
+#
+# Skopiuj do PRYWATNEGO repozytorium instalacji jako `.github/workflows/freshness-monitor.yml`.
+# W repozytorium publicznym przebiegi byłyby publiczne i ujawniałyby, że przepływ zgłoszeń stoi.
+# Opis, sekrety i procedura instalacji: docs/freshness-monitor.md w repozytorium produktu.
+name: Freshness monitor
+
+on:
+  schedule:
+    # Co pół godziny; GitHub może opóźnić albo pominąć uruchomienie, dlatego jest niezależna kontrola życia (W1).
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+# Przebiegi są szeregowane i nigdy anulowane w trakcie; kontrakt dostarczenia obowiązuje także, gdy to zawiedzie.
+concurrency:
+  group: freshness-monitor
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Zapis zawartości tylko dla tego joba: wypchnięcie gałęzi `monitor-state` ze stanem.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout prywatnego repozytorium (stan na gałęzi monitor-state)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: state-repo
+          persist-credentials: true
+
+      - name: Checkout sprawdzacza z repozytorium produktu (przypięty, zaudytowany commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: CityCouriers/wordpress-automation
+          # Wstaw pełny SHA zaudytowanego commitu (nie gałąź i nie tag).
+          ref: WSTAW_PELNY_SHA_COMMITU
+          path: monitor-src
+          persist-credentials: false
+          sparse-checkout: scripts/freshness-monitor
+
+      # Krok instalacji: uwierzytelnienie Google tożsamością sprawdzacza, która ma dostęp wyłącznie do pliku
+      # sygnałowego. Akcja przypięta do SHA (#232). Krok ma wystawić token jako `steps.google-auth.outputs.access_token`.
+      # - id: google-auth
+      #   uses: WSTAW/AKCJE-UWIERZYTELNIENIA@WSTAW_PELNY_SHA
+
+      - name: Przebieg sprawdzacza
+        env:
+          FRESHNESS_MONITOR_CONFIG: ${{ secrets.FRESHNESS_MONITOR_CONFIG }}
+          SIGNAL_FILE_ID: ${{ secrets.SIGNAL_FILE_ID }}
+          SIGNAL_RANGE: ${{ secrets.SIGNAL_RANGE }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          GOOGLE_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          STATE_REPO_DIR: state-repo
+        run: node monitor-src/scripts/freshness-monitor/cli.js check

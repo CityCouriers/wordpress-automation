@@ -305,7 +305,7 @@ Inne adresy komórek daje generator `sourceFreshnessFormula_(znacznik, próg, { 
 
 **Czego `STALE` nie mówi.** Świeżość to nie zdrowie. `STALE` znaczy tylko, że od progu nie pojawił się nowszy rekord. Nie odróżnia dnia bez zgłoszeń od zerwanej integracji ani awarii formularza. Silniejszy sygnał, czyli porównanie najwyższego identyfikatora rekordu w źródle i w arkuszu, jest poza zakresem.
 
-**Prezentacja.** Dostępność źródła (czy mechanizm odpowiada), jeśli jest mierzona, i świeżość trzymamy w osobnych komórkach. Status łączny, jeśli instalacja go składa, nie może pokazać `ACTIVE` przy świeżości `STALE`. Etykiety wyników można przetłumaczyć w warstwie prezentacji. Produkt nie ma dashboardu źródeł zewnętrznych, a jego instalacja należy do właściciela arkusza. Alert e-mail o `STALE` nie jest częścią tego mechanizmu.
+**Prezentacja.** Dostępność źródła (czy mechanizm odpowiada), jeśli jest mierzona, i świeżość trzymamy w osobnych komórkach. Status łączny, jeśli instalacja go składa, nie może pokazać `ACTIVE` przy świeżości `STALE`. Etykiety wyników można przetłumaczyć w warstwie prezentacji. Produkt nie ma dashboardu źródeł zewnętrznych, a jego instalacja należy do właściciela arkusza. Alert e-mail o `STALE` nie jest częścią tego mechanizmu: niezależny od Apps Script alert, który działa przy martwych wyzwalaczach i bez otwierania arkusza, opisuje [docs/freshness-monitor.md](docs/freshness-monitor.md) (#295).
 
 ### Import dzienny GSC: luka, zapis i czas etapów (#209)
 
