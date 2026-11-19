@@ -133,3 +133,56 @@ describe('runNodeSync', () => {
     assert.match(written, /status=null, signal=null, error=spawnSync .*ENOENT/);
   });
 });
+
+describe('NODE_V8_COVERAGE nie przechodzi do potomka (obejście P1, #297)', () => {
+  const probe = 'process.stdout.write(process.env.NODE_V8_COVERAGE ? "jest:" + process.env.NODE_V8_COVERAGE : "brak");';
+  let saved;
+
+  beforeEach(() => {
+    saved = process.env.NODE_V8_COVERAGE;
+    process.env.NODE_V8_COVERAGE = path.join(dir, 'cov');
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.NODE_V8_COVERAGE;
+    else process.env.NODE_V8_COVERAGE = saved;
+  });
+
+  test('runNode: env rodzica przekazany wprost albo domyślny nie niesie zmiennej do potomka', async () => {
+    const wprost = await runNode(child(probe), [], { env: { ...process.env } });
+    assert.equal(wprost.stdout, 'brak');
+    const domyslny = await runNode(child(probe), []);
+    assert.equal(domyslny.stdout, 'brak');
+  });
+
+  test('runNodeSync: tak samo, także gdy zmienna jest w env podanym jawnie', () => {
+    assert.equal(runNodeSync(child(probe), [], { env: { ...process.env } }).stdout, 'brak');
+    assert.equal(runNodeSync(child(probe), []).stdout, 'brak');
+    assert.equal(runNodeSync(child(probe), [], { env: { PATH: process.env.PATH, NODE_V8_COVERAGE: 'x' } }).stdout, 'brak');
+    // Node dopisuje zmienną z żywego środowiska rodzica także wtedy, gdy podane env jej nie zawiera:
+    assert.equal(runNodeSync(child(probe), [], { env: { PATH: process.env.PATH } }).stdout, 'brak');
+  });
+
+  test('opcja keepCoverageEnv zostawia zmienną (do sond porównawczych)', async () => {
+    const r = await runNode(child(probe), [], { env: { ...process.env }, keepCoverageEnv: true });
+    assert.equal(r.stdout, `jest:${path.join(dir, 'cov')}`);
+    const s = runNodeSync(child(probe), [], { env: { ...process.env }, keepCoverageEnv: true });
+    assert.equal(s.stdout, `jest:${path.join(dir, 'cov')}`);
+  });
+
+  test('ślad opisuje NODE_V8_COVERAGE z env potomka i osobno z rodzica', async () => {
+    const base = { status: 3221226505, signal: null, error: null, ms: 1, active: 1, stdout: '', stderr: '', pid: 1, startedAt: 'a', endedAt: 'b' };
+    assert.match(describeFailure('x.js', [], { ...base, childCoverage: false }), /NODE_V8_COVERAGE u potomka=brak \(rodzic: ustawione\)/);
+    assert.match(describeFailure('x.js', [], { ...base, childCoverage: true }), /NODE_V8_COVERAGE u potomka=ustawione \(rodzic: ustawione\)/);
+    delete process.env.NODE_V8_COVERAGE;
+    assert.match(describeFailure('x.js', [], { ...base, childCoverage: false }), /NODE_V8_COVERAGE u potomka=brak \(rodzic: brak\)/);
+  });
+
+  test('ślad z prawdziwego uruchomienia niesie stan potomka: po obejściu zawsze brak, z keepCoverageEnv ustawione', async () => {
+    await runNode(child('process.abort();'), [], { env: { ...process.env } });
+    assert.match(written, /NODE_V8_COVERAGE u potomka=brak \(rodzic: ustawione\)/);
+    written = '';
+    await runNode(child('process.abort();'), [], { env: { ...process.env }, keepCoverageEnv: true });
+    assert.match(written, /NODE_V8_COVERAGE u potomka=ustawione \(rodzic: ustawione\)/);
+  });
+});

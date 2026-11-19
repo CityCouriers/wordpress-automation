@@ -9,6 +9,16 @@
  * do pliku child-failures.log w tym katalogu. Z CHILD_DIAG_DIR potomek startuje też z raportem diagnostycznym Node
  * (--report-on-fatalerror, --report-uncaught-exception, --report-on-signal; pliki raportów trafiają do tego katalogu).
  *
+ * OBEJŚCIE (stan na #297, hipoteza potwierdzona pomiarem, nie ustalona przyczyna): potomek dostaje PUSTY NODE_V8_COVERAGE (bez pokrycia).
+ * Bieg z pokryciem (hook, bramka) ustawia tę zmienną w procesie testowym; potomek-CLI z nią zapisuje przy wyjściu własny plik
+ * pokrycia V8 i sporadycznie kończy się 0xC0000409 z pustymi strumieniami (sondy 20:12–20:21 z 19.11: 6 awarii w 1776 uruchomieniach
+ * z tą zmienną, 0 w 1724 bez niej; pełny zestaw z pokryciem padał w 5 z 31 przebiegów). Pokrycie potomków nie wchodzi do żadnej
+ * bramki: mierzone jest tylko src/*.gs (coverage-gate.js: --test-coverage-include=src/*.gs), a CLI z scripts/quality nie ładują src/.
+ * Usunięcie zmiennej dotyczy wyłącznie potomków; pokrycie procesu testowego zostaje. Opcja keepCoverageEnv: true przywraca stare
+ * zachowanie (sondy porównawcze).
+ * STRAŻNIK HIPOTEZY: diagnostyka zostaje po obejściu i wypisuje NODE_V8_COVERAGE z env POTOMKA. Awaria 0xC0000409 przy
+ * „NODE_V8_COVERAGE u potomka=brak" OBALA to wyjaśnienie (zmienna nie jest przyczyną) i obejście trzeba cofnąć.
+ *
  * WARUNEK USUNIĘCIA: gdy przyczyna zostanie ustalona i naprawiona albo po dwóch tygodniach bez awarii w CI i w hookach.
  * Usunięcie: wrócić w trzech plikach testów (apps-script-compare-drift, deployment-record, apps-script-compare)
  * do bezpośredniego `spawn`/`spawnSync` i skasować ten plik oraz test/node-child-diagnostics.test.js.
@@ -34,6 +44,17 @@ function diagFlags() {
   return ['--report-on-fatalerror', '--report-uncaught-exception', '--report-on-signal', `--report-directory=${dir}`];
 }
 
+/**
+ * Środowisko potomka: kopia env rodzica (albo podanego) z PUSTYM NODE_V8_COVERAGE, chyba że keepCoverageEnv.
+ * Samo usunięcie klucza nie działa: Node (24.15, Windows) dopisuje NODE_V8_COVERAGE z żywego środowiska rodzica do potomka
+ * także wtedy, gdy podane env go nie zawiera (sprawdzone sondą); pusta wartość wyłącza pokrycie potomka.
+ */
+function childEnv(env, keepCoverageEnv) {
+  const out = { ...(env || process.env) };
+  if (!keepCoverageEnv) out.NODE_V8_COVERAGE = '';
+  return out;
+}
+
 /** Opis nieudanego potomka do wypisania; niezerowy status inny niż 0 i 1 albo sygnał albo błąd spawn. */
 function describeFailure(script, args, r) {
   return [
@@ -41,7 +62,7 @@ function describeFailure(script, args, r) {
     `  skrypt=${path.basename(script)} args=${JSON.stringify(args)}`,
     `  pid=${r.pid}, start=${r.startedAt}, koniec=${r.endedAt} (czasy lokalnego zegara tego procesu, ISO UTC z ms)`,
     `  czas życia=${r.ms} ms, równoległych potomków w tym procesie=${r.active}, wolna pamięć=${Math.round(os.freemem() / 1048576)} MB, ` +
-      `NODE_V8_COVERAGE=${process.env.NODE_V8_COVERAGE ? 'ustawione' : 'brak'}, ${new Date().toISOString()}`,
+      `NODE_V8_COVERAGE u potomka=${r.childCoverage ? 'ustawione' : 'brak'} (rodzic: ${process.env.NODE_V8_COVERAGE ? 'ustawione' : 'brak'}), ${new Date().toISOString()}`,
     `  stdout (${r.stdout.length} znaków): ${JSON.stringify(r.stdout)}`,
     `  stderr (${r.stderr.length} znaków): ${JSON.stringify(r.stderr)}`
   ].join('\n');
@@ -60,13 +81,14 @@ function note(script, args, r) {
 }
 
 /** Asynchronicznie (serwer atrapy działa w tym procesie): zwraca { status, signal, stdout, stderr, error, ms, active }. */
-function runNode(script, args, { env, cwd } = {}) {
+function runNode(script, args, { env, cwd, keepCoverageEnv = false } = {}) {
   return new Promise(resolve => {
     const t0 = Date.now();
     const startedAt = new Date(t0).toISOString();
     inflight += 1;
     const active = inflight;
-    const child = spawn(process.execPath, [...diagFlags(), script, ...args], { env, cwd });
+    const env2 = childEnv(env, keepCoverageEnv);
+    const child = spawn(process.execPath, [...diagFlags(), script, ...args], { env: env2, cwd });
     let stdout = '';
     let stderr = '';
     let error = null;
@@ -76,7 +98,7 @@ function runNode(script, args, { env, cwd } = {}) {
     child.on('close', (status, signal) => {
       inflight -= 1;
       const t1 = Date.now();
-      const r = { status, signal, stdout, stderr, error, ms: t1 - t0, active, pid: child.pid, startedAt, endedAt: new Date(t1).toISOString() };
+      const r = { status, signal, stdout, stderr, error, ms: t1 - t0, active, childCoverage: Boolean(env2.NODE_V8_COVERAGE), pid: child.pid, startedAt, endedAt: new Date(t1).toISOString() };
       note(script, args, r);
       resolve(r);
     });
@@ -84,14 +106,15 @@ function runNode(script, args, { env, cwd } = {}) {
 }
 
 /** Synchronicznie; opcje jak w spawnSync (encoding 'utf8' ustawiony tutaj), wynik jak w spawnSync plus ms i ślad. */
-function runNodeSync(script, args, options = {}) {
+function runNodeSync(script, args, { keepCoverageEnv = false, ...options } = {}) {
   const t0 = Date.now();
   const startedAt = new Date(t0).toISOString();
-  const r = spawnSync(process.execPath, [...diagFlags(), script, ...args], { encoding: 'utf8', ...options });
+  const env2 = childEnv(options.env, keepCoverageEnv);
+  const r = spawnSync(process.execPath, [...diagFlags(), script, ...args], { encoding: 'utf8', ...options, env: env2 });
   const t1 = Date.now();
   const view = {
     status: r.status, signal: r.signal, stdout: r.stdout || '', stderr: r.stderr || '', error: r.error ? r.error.message : null,
-    ms: t1 - t0, active: 1, pid: r.pid, startedAt, endedAt: new Date(t1).toISOString()
+    ms: t1 - t0, active: 1, childCoverage: Boolean(env2.NODE_V8_COVERAGE), pid: r.pid, startedAt, endedAt: new Date(t1).toISOString()
   };
   note(script, args, view);
   return r;
