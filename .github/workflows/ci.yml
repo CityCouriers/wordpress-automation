@@ -124,11 +124,13 @@ jobs:
         run: |
           # Bez --first-parent i --no-merges, bo pomijają commity boczne i zmiany w samym merge'u.
           # --diff-merges=first-parent pokazuje merge wobec pierwszego rodzica, także rozwiązanie konfliktu.
+          # -v wypisuje plik, linię, commit i odcisk znaleziska; wartość zostaje zredagowana przez --redact (#303).
+          # Wyjątki: .gitleaksignore w katalogu głównym, pilnowany przez test/secret-scan.test.js.
           scope=--all
           if [ "$EVENT_NAME" = pull_request ]; then
             scope="${BASE_SHA}..${HEAD_SHA}"
           fi
-          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts="--diff-merges=first-parent $scope" .
+          "$RUNNER_TEMP/gitleaks" git --redact -v --no-banner --log-opts="--diff-merges=first-parent $scope" .
 
   # Job zbiorczy (#242): jedna kontrola wymagana przez `main`. Zielony tylko, gdy każdy job z listy wymaganych ma wynik
   # `success` (pominięty, anulowany i brakujący dają czerwony); lista jest w scripts/quality/quality-gate.js, a test
