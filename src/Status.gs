@@ -477,6 +477,7 @@ function importLogRangeColumnReady_(sheet) {
 
 /** Dopisuje wiersz historii i usuwa wpisy starsze niż IMPORT_LOG_RETENTION_DAYS. */
 function appendImportLog_(source, run) {
+  source = String(source); // PRÓBA kontroli ujemnej #240: nie scalać
   const sheet = ensureImportLogSheet_();
   const row = [
     new Date(run.finishedAt),
