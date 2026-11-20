@@ -125,8 +125,9 @@ skryptach przechodzą na polski przy okazji kolejnych zmian, bez masowego tłuma
   `test/`, `scripts/`; w tym `eol-last` (znak nowej linii na końcu pliku, Apps Script go wymaga).
 - `npm run quality:debt` — zapadka długu rozmiaru i złożoności (#240, `scripts/quality/debt-ratchet.js`,
   limity w `.quality/debt-limits.json`, baza długu w `.quality/debt-baseline.json`, opis w
-  [docs/quality/debt-ratchet.md](docs/quality/debt-ratchet.md)). Dług może tylko maleć; na razie tryb
-  raportu (nie blokuje), miary dołączają osobne zgłoszenia.
+  [docs/quality/debt-ratchet.md](docs/quality/debt-ratchet.md)). Dług może tylko maleć; krok w CI
+  (`validate`) i hook pre-commit działają w trybie blokady (`--mode=enforce`): zmiana funkcji z długiem bez spłaty
+  (`touched-over-limit`) i wzrost wpisu są czerwone. Pilnuje tego `test/debt-ratchet-wiring.test.js`.
 - Job `quality-gate` w `.github/workflows/ci.yml` (#242) — agregat kontroli CI: zielony tylko, gdy każdy job z listy
   wymaganych (`scripts/quality/quality-gate.js`, `REQUIRED_JOBS`) ma wynik `success` (pominięty, anulowany i brakujący
   dają czerwony). Nowy job kontrolny dopisujesz w `ci.yml` (`needs` jobu) i do listy; test zgodności pilnuje obu miejsc.
