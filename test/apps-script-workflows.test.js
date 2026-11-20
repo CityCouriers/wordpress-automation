@@ -13,6 +13,7 @@ const os = require('os');
 const path = require('path');
 
 const { stripGitEnv } = require('./helpers/git-env');
+const { runNodeSync } = require('./helpers/node-child');
 
 // Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
 stripGitEnv();
@@ -89,7 +90,43 @@ describe('deploy-apps-script.yml: zapis jawnego rekordu wdrożenia', () => {
   test('narzędzie zapisu rekordu pochodzi z main (sparse checkout), jak narzędzie porównania', () => {
     const s = list[stepNamed(list, 'Checkout deploy tooling from main')];
     assert.match(s.text, /^ {10}ref: main$/m);
-    assert.match(s.text, /scripts\/quality\/apps-script-compare\.js\n {12}scripts\/quality\/deployment-record\.js\n/);
+    assert.match(s.text, /^ {12}scripts\/quality\/apps-script-compare\.js$/m);
+    assert.match(s.text, /^ {12}scripts\/quality\/deployment-record\.js$/m);
+  });
+
+  test('sparse checkout narzędzi zawiera każdy moduł lokalny, który narzędzia wymagają (domknięcie require)', () => {
+    const s = list[stepNamed(list, 'Checkout deploy tooling from main')];
+    const sparse = new Set([...s.text.matchAll(/^ {12}(scripts\/quality\/[\w.-]+\.js)$/gm)].map(m => m[1]));
+    const dir = path.resolve(__dirname, '..');
+    // Krok deployu uruchamia dwa skrypty; ich lokalne `require('./x')` muszą być pobrane, inaczej MODULE_NOT_FOUND po clasp push.
+    const todo = ['scripts/quality/apps-script-compare.js', 'scripts/quality/deployment-record.js'];
+    const seen = new Set();
+    while (todo.length) {
+      const f = todo.pop();
+      if (seen.has(f)) continue;
+      seen.add(f);
+      const src = fs.readFileSync(path.join(dir, f), 'utf8');
+      for (const m of src.matchAll(/require\('\.\/([\w.-]+)'\)/g)) todo.push(`scripts/quality/${m[1]}${m[1].endsWith('.js') ? '' : '.js'}`);
+    }
+    assert.ok(seen.has('scripts/quality/apps-script-drift.js'), 'domknięcie widzi moduł drift (kontrola samego testu)');
+    for (const f of seen) assert.ok(sparse.has(f), `${f} jest wymagany przez narzędzia deployu, a nie ma go w sparse-checkout`);
+  });
+
+  test('odtworzenie: katalog z samymi plikami z listy sparse uruchamia compare bez MODULE_NOT_FOUND', () => {
+    const s = list[stepNamed(list, 'Checkout deploy tooling from main')];
+    const files = [...s.text.matchAll(/^ {12}(scripts\/quality\/[\w.-]+\.js)$/gm)].map(m => m[1]);
+    const tooling = fs.mkdtempSync(path.join(os.tmpdir(), 'tooling-'));
+    roots.push(tooling);
+    for (const f of files) {
+      fs.mkdirSync(path.dirname(path.join(tooling, f)), { recursive: true });
+      fs.copyFileSync(path.resolve(__dirname, '..', f), path.join(tooling, f));
+    }
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'tooling-cwd-'));
+    roots.push(empty);
+    for (const script of ['apps-script-compare.js', 'deployment-record.js']) {
+      const r = runNodeSync(path.join(tooling, 'scripts', 'quality', script), script === 'apps-script-compare.js' ? ['--cwd', empty] : ['finish'], { cwd: empty, env: { ...process.env, APPS_SCRIPT_PULL_CMD: 'node -e 0' } });
+      assert.doesNotMatch(`${r.stderr}${r.stdout}`, /MODULE_NOT_FOUND|Cannot find module/, `${script} w katalogu z samą listą sparse`);
+    }
   });
 
   test('żaden krok `run` nie interpoluje wyrażeń ${{ }} (wejścia tylko przez env)', () => {

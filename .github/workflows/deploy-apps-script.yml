@@ -91,6 +91,7 @@ jobs:
           path: .deploy-tooling
           sparse-checkout: |
             scripts/quality/apps-script-compare.js
+            scripts/quality/apps-script-drift.js
             scripts/quality/deployment-record.js
           sparse-checkout-cone-mode: false
 
