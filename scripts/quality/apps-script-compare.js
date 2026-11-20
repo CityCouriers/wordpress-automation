@@ -17,8 +17,16 @@
  *      (np. .clasp.json) nie liczy się jako różnica.
  *   5. Różnica → lista plików, patch (opcjonalnie do pliku) i kod wyjścia 1.
  *
+ * Tryb `--drift` (#297, drift check) nie porównuje z checkoutem, tylko z rewizją
+ * WDROŻONĄ: wskazuje ją jawny rekord GitHub Deployments, drzewo rewizji jest czytane
+ * jako dane, a Version.gs porównywany w całości z kanonicznym zapisem. Logika w
+ * apps-script-drift.js; tu tylko pobranie projektu i raport.
+ *
  * Użycie:
  *   node scripts/quality/apps-script-compare.js [--label <opis>] [--patch <plik>] [--cwd <katalog>]
+ *   node scripts/quality/apps-script-compare.js --drift --cwd <czysty katalog pobrania> --repo-dir <repo z main>
+ *        [--ref-dir <katalog roboczy>] [--patch <plik względem katalogu bieżącego>]
+ *   (w trybie --drift: GITHUB_REPOSITORY, GH_TOKEN, opcjonalnie COMPARE_REF = tryb diagnostyczny)
  * Zmienna APPS_SCRIPT_PULL_CMD nadpisuje komendę pobrania (domyślnie `npx clasp pull`);
  * testy podstawiają w ten sposób fałszywy clasp.
  */
@@ -26,9 +34,10 @@
 const { spawnSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { runDrift } = require('./apps-script-drift');
 
 function parseArgs(argv) {
-  const opts = { label: 'the checked-out ref', patch: '', cwd: process.cwd() };
+  const opts = { label: 'the checked-out ref', patch: '', cwd: process.cwd(), drift: false, repoDir: process.cwd(), refDir: '' };
   const value = (i, flag) => {
     if (i + 1 >= argv.length || argv[i + 1].startsWith('--')) throw new Error(`${flag} requires a value`);
     return argv[i + 1];
@@ -37,9 +46,18 @@ function parseArgs(argv) {
     if (argv[i] === '--label') opts.label = value(i++, '--label');
     else if (argv[i] === '--patch') opts.patch = value(i++, '--patch');
     else if (argv[i] === '--cwd') opts.cwd = path.resolve(value(i++, '--cwd'));
+    else if (argv[i] === '--drift') opts.drift = true;
+    else if (argv[i] === '--repo-dir') opts.repoDir = path.resolve(value(i++, '--repo-dir'));
+    else if (argv[i] === '--ref-dir') opts.refDir = path.resolve(value(i++, '--ref-dir'));
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   return opts;
+}
+
+/** Wypisuje raport i dopisuje go do podsumowania joba. */
+function report(text) {
+  console.log(text);
+  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + '\n');
 }
 
 function git(cwd, args) {
@@ -131,8 +149,25 @@ function compare(cwd) {
   return { changes, patch };
 }
 
-function main() {
+/** Drift check: rewizja z jawnego rekordu wdrożenia (albo diagnostyczna z COMPARE_REF). */
+async function driftMain(opts) {
+  const result = await runDrift(opts, process.env, pull);
+  for (const notice of result.notices) console.log(`::notice::${notice}`);
+  const summary = result.lines;
+  if (result.patch && opts.patch) {
+    fs.writeFileSync(path.resolve(opts.patch), result.patch);
+    summary.push(`Patch saved to ${opts.patch}.`);
+  }
+  report(summary.join('\n'));
+  if (!result.ok) {
+    console.error(`::error::${result.headline}${result.patch && opts.patch ? ' Patch w artefakcie.' : ''}`);
+    process.exitCode = 1; // bez process.exit: na Windows kończy proces z otwartym uchwytem fetch awarią
+  }
+}
+
+async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.drift) return driftMain(opts);
   const pulled = pull(opts.cwd);
   const { changes, patch } = compare(opts.cwd);
   const summary = [];
@@ -148,9 +183,7 @@ function main() {
     }
   }
 
-  const text = summary.join('\n');
-  console.log(text);
-  if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + '\n');
+  report(summary.join('\n'));
   if (changes) {
     console.error(`::error::Apps Script project differs from ${opts.label}. See the job summary${opts.patch ? ' and the patch artifact' : ''}.`);
     process.exit(1);
@@ -158,12 +191,10 @@ function main() {
 }
 
 if (require.main === module) {
-  try {
-    main();
-  } catch (e) {
+  main().catch(e => {
     console.error(`\n[apps-script-compare] FAIL: ${e.message}`);
-    process.exit(1);
-  }
+    process.exitCode = 1;
+  });
 }
 
 module.exports = { compare, normalizeTrailingNewline, normalizeIndexTrailingNewline };
