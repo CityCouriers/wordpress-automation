@@ -62,10 +62,10 @@ jobs:
       - name: Lint Apps Script sources
         run: npm run lint
 
-      # Zapadka długu rozmiaru i złożoności (#240): dług może tylko maleć. W tym kroku tylko raport
-      # (nie blokuje); miary dołączają osobne zgłoszenia, blokada włącza się osobnym PR.
+      # Zapadka długu rozmiaru i złożoności (#240): dług może tylko maleć. Krok blokuje (tryb enforce):
+      # czerwony wynik (m.in. touched-over-limit i wzrost wpisu) zatrzymuje job validate.
       # Baza z PR jest porównywana ze stanem bazowym PR (pełna historia z fetch-depth: 0).
-      - name: Debt ratchet (report)
+      - name: Debt ratchet
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -73,9 +73,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            node scripts/quality/debt-ratchet.js --mode=report --base="$BASE_SHA"
+            node scripts/quality/debt-ratchet.js --mode=enforce --base="$BASE_SHA"
           else
-            node scripts/quality/debt-ratchet.js --mode=report --base=none
+            node scripts/quality/debt-ratchet.js --mode=enforce --base=none
           fi
 
       # Unit tests load the .gs files into a VM with stubbed Google services
