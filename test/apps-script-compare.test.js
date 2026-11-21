@@ -364,3 +364,80 @@ describe('apps-script-compare: układ src ogranicza porównanie do plików źró
     assert.doesNotMatch(r.out, /notes\.txt/);
   });
 });
+
+/**
+ * #312: spłata 22 ocalałych mutantów w funkcjach nietkniętych przez #297 (Stryker, kontrola zerowa na `main` = `b4abce3`).
+ * Każdy test opisuje zachowanie, którego zmutowany kod nie zachowuje; mutanty bez takiego zachowania (równoważne)
+ * są rozliczone w opisie PR razem z niezależnym audytem.
+ */
+describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
+  const git = (root, args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+
+  function cli(root, fake, args, { env = {}, noPullCmd = false } = {}) {
+    const full = { ...process.env, APPS_SCRIPT_PULL_CMD: `"${process.execPath}" "${fake}"`, ...env };
+    if (noPullCmd) delete full.APPS_SCRIPT_PULL_CMD;
+    const r = runNodeSync(SCRIPT, [...args], { encoding: 'utf8', env: full });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  }
+
+  test('git poza repozytorium: błąd niesie stderr gita (strumienie git() są przechwytywane, nie przekazywane dalej)', () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-nogit-'));
+    roots.push(plain);
+    const { fake } = repo('');
+    const r = cli(plain, fake, ['--cwd', plain], { env: { LC_ALL: 'C', LANGUAGE: 'C', GIT_CEILING_DIRECTORIES: path.dirname(plain) } });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /\[apps-script-compare\] FAIL: Command failed: git ls-files[^\n]*\nfatal: not a git repository/);
+    assert.equal(r.stdout, '');
+  });
+
+  test('pull(): opcja shell zależy od platformy (tylko win32 używa powłoki dla npx), sprawdzone dla obu gałęzi', () => {
+    const { root, fake } = repo('');
+    const pre = path.join(root, 'preload-platform.js');
+    // Atrapa: podmienia platformę i spawnSync; wywołanie `npx` zapisuje (polecenie, argumenty, shell) zamiast je uruchamiać.
+    fs.writeFileSync(pre, [
+      "const cp = require('child_process'); const fs = require('fs');",
+      "Object.defineProperty(process, 'platform', { value: process.env.FAKE_PLATFORM });",
+      'const real = cp.spawnSync;',
+      'cp.spawnSync = function (cmd, args, opts) {',
+      "  if (cmd === 'npx') { fs.writeFileSync(process.env.REC_FILE, JSON.stringify({ cmd, args, shell: opts.shell })); return { status: 0, stdout: 'ATRAPA', stderr: '' }; }",
+      '  return real.apply(this, arguments);',
+      '};'
+    ].join('\n'));
+    const seen = {};
+    for (const platform of ['win32', 'linux', 'darwin']) {
+      const rec = path.join(root, `rec-${platform}.json`);
+      const r = cli(root, fake, ['--cwd', root, '--label', 'v1'], {
+        noPullCmd: true,
+        env: { NODE_OPTIONS: `--require "${pre.split(path.sep).join('/')}"`, FAKE_PLATFORM: platform, REC_FILE: rec }
+      });
+      assert.equal(r.status, 0, platform + ': ' + r.stderr);
+      assert.match(r.stdout, /ATRAPA/, platform + ': wynik pobrania trafia do raportu');
+      seen[platform] = JSON.parse(fs.readFileSync(rec, 'utf8'));
+    }
+    assert.deepEqual(seen.win32, { cmd: 'npx', args: ['clasp', 'pull'], shell: true });
+    assert.deepEqual(seen.linux, { cmd: 'npx', args: ['clasp', 'pull'], shell: false });
+    assert.deepEqual(seen.darwin, { cmd: 'npx', args: ['clasp', 'pull'], shell: false });
+  });
+
+  test('plik usunięty w żywym projekcie jest driftem, a jego usunięcie trafia do patcha bez ruszania indeksu', () => {
+    const { root, fake } = repo("fs.unlinkSync('GA4.gs');");
+    const r = cli(root, fake, ['--cwd', root, '--patch', 'del.patch']);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stdout, / D GA4\.gs/);
+    const patch = fs.readFileSync(path.join(root, 'del.patch'), 'utf8');
+    assert.match(patch, /deleted file mode/);
+    assert.match(patch, /-function b\(\) \{\}/);
+    assert.equal(git(root, ['diff', '--cached', '--name-only']), '', 'usunięcie nie zostaje w indeksie');
+  });
+
+  test('normalizacja indeksu zostaje po przebiegu z driftem w innym pliku (reset dotyczy tylko plików intent-to-add)', () => {
+    const { root, fake } = repo("fs.writeFileSync('Kod.gs', 'function a() {}\\n'); fs.writeFileSync('GA4.gs', 'function b() { return 1; }\\n');");
+    fs.writeFileSync(path.join(root, 'Kod.gs'), 'function a() {}');
+    git(root, ['commit', '-q', '-am', 'bez końcowej nowej linii']);
+    const r = cli(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stdout, / M GA4\.gs/);
+    assert.doesNotMatch(r.stdout, /Kod\.gs/, 'sama końcowa nowa linia nie jest driftem');
+    assert.equal(git(root, ['diff', '--cached', '--name-only']).trim(), 'Kod.gs', 'znormalizowana wersja pliku zostaje w indeksie');
+  });
+});
