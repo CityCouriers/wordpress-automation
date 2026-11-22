@@ -490,7 +490,7 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
   });
 
   // Charakteryzacja znanego ograniczenia: nazwa z ls-files jest przycinana, więc plik z wiodącym białym znakiem nie jest normalizowany
-  // i różnica samej końcowej nowej linii zostaje zgłoszona jako drift. Test zapisuje to zachowanie; naprawa (git ls-files -z) odwróci asercję.
+  // i różnica samej końcowej nowej linii zostaje zgłoszona jako drift. Test zapisuje to zachowanie; naprawa (#317, git ls-files -z) odwróci asercję.
   test('znane ograniczenie: śledzony plik z wiodącą spacją albo NBSP w nazwie nie jest normalizowany (nazwa z ls-files jest przycinana)', () => {
     const { root } = mini({ ' Sp.gs': 'x', [`${NBSP}Nb.gs`]: 'x', 'Kod.gs': 'function a() {}\n' });
     git(root, ['config', 'core.quotePath', 'false']);
@@ -501,7 +501,7 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.match(changes, /Nb\.gs/);
   });
 
-  // Charakteryzacja znanego ograniczenia: `git show` czyta przez spawnSync z limitem 1 MiB; większy blob jest pomijany (status null).
+  // Charakteryzacja znanego ograniczenia: `git show` czyta przez spawnSync z limitem 1 MiB; większy blob jest pomijany (status null). Naprawa: #318.
   test('znane ograniczenie: śledzony plik większy niż 1 MiB bez końcowej nowej linii nie jest normalizowany', () => {
     const size = 1048577;
     let content = '';
@@ -532,7 +532,7 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.equal(compare(root).changes, ' D appsscript.json/n');
   });
 
-  // Charakteryzacja znanego ograniczenia: nazwa nieśledzonego pliku z linii statusu jest przycinana, więc `git add -N` dostaje nieistniejącą ścieżkę.
+  // Charakteryzacja znanego ograniczenia: nazwa nieśledzonego pliku z linii statusu jest przycinana, więc `git add -N` dostaje nieistniejącą ścieżkę (#317).
   test('znane ograniczenie: nieśledzony plik z wiodącym NBSP w nazwie kończy kontrolę błędem git add -N', () => {
     const { root, g } = mini(BASE);
     g('config', 'core.quotePath', 'false');
