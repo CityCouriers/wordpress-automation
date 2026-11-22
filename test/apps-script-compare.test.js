@@ -364,3 +364,205 @@ describe('apps-script-compare: układ src ogranicza porównanie do plików źró
     assert.doesNotMatch(r.out, /notes\.txt/);
   });
 });
+
+/**
+ * #312: spłata 22 ocalałych mutantów w funkcjach nietkniętych przez #297 (Stryker, kontrola zerowa na `main` = `b4abce3`).
+ * Każdy test opisuje zachowanie, którego zmutowany kod nie zachowuje; mutanty bez takiego zachowania (równoważne)
+ * są rozliczone w opisie PR razem z niezależnym audytem.
+ */
+describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
+  const git = (root, args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+
+  function cli(root, fake, args, { env = {}, noPullCmd = false } = {}) {
+    const full = { ...process.env, APPS_SCRIPT_PULL_CMD: `"${process.execPath}" "${fake}"`, ...env };
+    if (noPullCmd) delete full.APPS_SCRIPT_PULL_CMD;
+    const r = runNodeSync(SCRIPT, [...args], { encoding: 'utf8', env: full });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  }
+
+  test('git poza repozytorium: błąd niesie stderr gita (strumienie git() są przechwytywane, nie przekazywane dalej)', () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-nogit-'));
+    roots.push(plain);
+    const { fake } = repo('');
+    const r = cli(plain, fake, ['--cwd', plain], { env: { LC_ALL: 'C', LANGUAGE: 'C', GIT_CEILING_DIRECTORIES: path.dirname(plain) } });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /\[apps-script-compare\] FAIL: Command failed: git ls-files[^\n]*\nfatal: not a git repository/);
+    assert.equal(r.stdout, '');
+  });
+
+  test('pull(): opcja shell zależy od platformy (tylko win32 używa powłoki dla npx), sprawdzone dla obu gałęzi', () => {
+    const { root, fake } = repo('');
+    const pre = path.join(root, 'preload-platform.js');
+    // Atrapa: podmienia platformę i spawnSync; wywołanie `npx` zapisuje (polecenie, argumenty, shell) zamiast je uruchamiać.
+    fs.writeFileSync(pre, [
+      "const cp = require('child_process'); const fs = require('fs');",
+      "Object.defineProperty(process, 'platform', { value: process.env.FAKE_PLATFORM });",
+      'const real = cp.spawnSync;',
+      'cp.spawnSync = function (cmd, args, opts) {',
+      "  if (cmd === 'npx') { fs.writeFileSync(process.env.REC_FILE, JSON.stringify({ cmd, args, shell: opts.shell })); return { status: 0, stdout: 'ATRAPA', stderr: '' }; }",
+      '  return real.apply(this, arguments);',
+      '};'
+    ].join('\n'));
+    const seen = {};
+    for (const platform of ['win32', 'linux', 'darwin']) {
+      const rec = path.join(root, `rec-${platform}.json`);
+      const r = cli(root, fake, ['--cwd', root, '--label', 'v1'], {
+        noPullCmd: true,
+        env: { NODE_OPTIONS: `--require "${pre.split(path.sep).join('/')}"`, FAKE_PLATFORM: platform, REC_FILE: rec }
+      });
+      assert.equal(r.status, 0, platform + ': ' + r.stderr);
+      assert.match(r.stdout, /ATRAPA/, platform + ': wynik pobrania trafia do raportu');
+      seen[platform] = JSON.parse(fs.readFileSync(rec, 'utf8'));
+    }
+    assert.deepEqual(seen.win32, { cmd: 'npx', args: ['clasp', 'pull'], shell: true });
+    assert.deepEqual(seen.linux, { cmd: 'npx', args: ['clasp', 'pull'], shell: false });
+    assert.deepEqual(seen.darwin, { cmd: 'npx', args: ['clasp', 'pull'], shell: false });
+  });
+
+  test('plik usunięty w żywym projekcie jest driftem, a jego usunięcie trafia do patcha bez ruszania indeksu', () => {
+    const { root, fake } = repo("fs.unlinkSync('GA4.gs');");
+    const r = cli(root, fake, ['--cwd', root, '--patch', 'del.patch']);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stdout, / D GA4\.gs/);
+    const patch = fs.readFileSync(path.join(root, 'del.patch'), 'utf8');
+    assert.match(patch, /deleted file mode/);
+    assert.match(patch, /-function b\(\) \{\}/);
+    assert.equal(git(root, ['diff', '--cached', '--name-only']), '', 'usunięcie nie zostaje w indeksie');
+  });
+
+  test('normalizacja indeksu zostaje po przebiegu z driftem w innym pliku (reset dotyczy tylko plików intent-to-add)', () => {
+    const { root, fake } = repo("fs.writeFileSync('Kod.gs', 'function a() {}\\n'); fs.writeFileSync('GA4.gs', 'function b() { return 1; }\\n');");
+    fs.writeFileSync(path.join(root, 'Kod.gs'), 'function a() {}');
+    git(root, ['commit', '-q', '-am', 'bez końcowej nowej linii']);
+    const r = cli(root, fake, ['--cwd', root]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stdout, / M GA4\.gs/);
+    assert.doesNotMatch(r.stdout, /Kod\.gs/, 'sama końcowa nowa linia nie jest driftem');
+    assert.equal(git(root, ['diff', '--cached', '--name-only']).trim(), 'Kod.gs', 'znormalizowana wersja pliku zostaje w indeksie');
+  });
+
+  /**
+   * Testy poniżej wynikają z niezależnego audytu mutantów uznanych wstępnie za równoważne: audyt wykazał, że da się je zabić.
+   * Używają `compare()` bezpośrednio na repozytorium bez Version.gs i appsscript.json (część z nich wymaga braku pliku o tej nazwie).
+   */
+  const { compare } = require(SCRIPT);
+  const NBSP = ' ';
+
+  function mini(files) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-mini-'));
+    roots.push(root);
+    const g = (...args) => git(root, args);
+    g('init', '-q');
+    g('config', 'user.email', 'test@example.pl');
+    g('config', 'user.name', 'test');
+    g('config', 'core.autocrlf', 'false');
+    for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(root, name), content);
+    g('add', '-A');
+    g('commit', '-q', '-m', 'base');
+    return { root, g };
+  }
+
+  const BASE = { 'Kod.gs': 'function a() {}\n', 'GA4.gs': 'function b() {}\n' };
+
+  // Wpis tylko w indeksie pod „katalogiem” appsscript.json (pathspec dosłowny obejmuje wszystko pod nim); plik na dysku nie powstaje.
+  function indexOnly(g, root, name, { commit = false } = {}) {
+    const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: root, input: 'hello\n', encoding: 'utf8' }).trim();
+    g('-c', 'core.protectNTFS=false', 'update-index', '--add', '--cacheinfo', `100644,${blob},${name}`);
+    if (commit) g('-c', 'core.protectNTFS=false', 'commit', '-q', '-m', 'wpis');
+    else g('-c', 'core.protectNTFS=false', 'update-index', '--skip-worktree', name);
+  }
+
+  test('stdin gita to urządzenie znakowe (null), nie potok: sterownik diff.external widzi rodzaj deskryptora', () => {
+    const { root, g } = mini(BASE);
+    const ext = path.join(root, 'ext-diff.js');
+    fs.writeFileSync(ext, [
+      "const fs = require('fs');",
+      'const st = fs.fstatSync(0);',
+      "fs.writeFileSync(process.env.STDIN_OUT, st.isCharacterDevice() ? 'char' : st.isFIFO() ? 'fifo' : st.isSocket() ? 'socket' : 'other');"
+    ].join('\n'));
+    const fwd = p => p.split(path.sep).join('/');
+    g('config', 'diff.external', `"${fwd(process.execPath)}" "${fwd(ext)}"`);
+    fs.writeFileSync(path.join(root, 'GA4.gs'), 'function b() { return 1; }\n');
+    const out = path.join(root, 'stdin-type.txt');
+    process.env.STDIN_OUT = out;
+    try { compare(root); } finally { delete process.env.STDIN_OUT; }
+    assert.equal(fs.readFileSync(out, 'utf8'), 'char');
+  });
+
+  // Charakteryzacja znanego ograniczenia: nazwa z ls-files jest przycinana, więc plik z wiodącym białym znakiem nie jest normalizowany
+  // i różnica samej końcowej nowej linii zostaje zgłoszona jako drift. Test zapisuje to zachowanie; naprawa (#317, git ls-files -z) odwróci asercję.
+  test('znane ograniczenie: śledzony plik z wiodącą spacją albo NBSP w nazwie nie jest normalizowany (nazwa z ls-files jest przycinana)', () => {
+    const { root } = mini({ ' Sp.gs': 'x', [`${NBSP}Nb.gs`]: 'x', 'Kod.gs': 'function a() {}\n' });
+    git(root, ['config', 'core.quotePath', 'false']);
+    fs.writeFileSync(path.join(root, ' Sp.gs'), 'x\n');
+    fs.writeFileSync(path.join(root, `${NBSP}Nb.gs`), 'x\n');
+    const { changes } = compare(root);
+    assert.match(changes, /Sp\.gs/);
+    assert.match(changes, /Nb\.gs/);
+  });
+
+  // Charakteryzacja znanego ograniczenia (#318): gdy `git show` kończy się niepowodzeniem, nawet z pełnym stdout, plik jest pomijany i nie jest normalizowany.
+  // Prawdziwy blob 1 MiB + 1 B nie nadaje się do tego testu: spawnSync przekraczający maxBuffer ustawia error ENOBUFS, ale status zależy od wyścigu
+  // (null, gdy Node zdąży zabić gita; 0, gdy git zdążył już wyjść; na Linuksie w CI obserwowano oba wyniki dla tego samego kodu). Dlatego wynik
+  // spawnSync dla `git show` jest tu atrapą zgodną z opisem Node dla ENOBUFS (status null, error ENOBUFS, stdout z pełną zawartością).
+  test('znane ograniczenie: gdy git show kończy się niepowodzeniem (ENOBUFS), plik bez końcowej nowej linii nie jest normalizowany', () => {
+    const { root } = mini({ 'Big.gs': 'x', 'Kod.gs': 'function a() {}\n' });
+    fs.writeFileSync(path.join(root, 'Big.gs'), 'x\n');
+    const cp = require('child_process');
+    const real = cp.spawnSync;
+    cp.spawnSync = function (cmd, args) {
+      const r = real.apply(this, arguments);
+      if (cmd === 'git' && args[0] === 'show') {
+        return { ...r, status: null, error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }) };
+      }
+      return r;
+    };
+    let patched;
+    try {
+      delete require.cache[SCRIPT];
+      patched = require(SCRIPT);
+    } finally {
+      cp.spawnSync = real;
+      delete require.cache[SCRIPT];
+    }
+    assert.equal(patched.compare(root).changes, ' M Big.gs');
+    assert.equal(compare(root).changes, '', 'bez atrapy ten sam plik jest normalizowany (sama końcowa nowa linia nie jest driftem)');
+  });
+
+  test('zmiana tylko w indeksie, której ścieżka kończy się na ?? (pod appsscript.json/), nie jest driftem', () => {
+    const { root, g } = mini(BASE);
+    indexOnly(g, root, 'appsscript.json/a??');
+    assert.deepEqual(compare(root), { changes: '', patch: '' });
+  });
+
+  test('białe znaki na końcu ostatniego wiersza raportu są obcinane w całości (dwa NBSP)', () => {
+    const { root, g } = mini(BASE);
+    indexOnly(g, root, `appsscript.json/n${NBSP}${NBSP}`, { commit: true });
+    g('config', 'core.quotePath', 'false');
+    assert.equal(compare(root).changes, ' D appsscript.json/n');
+  });
+
+  test('jeden końcowy NBSP w ostatnim wierszu raportu jest obcinany', () => {
+    const { root, g } = mini(BASE);
+    indexOnly(g, root, `appsscript.json/n${NBSP}`, { commit: true });
+    g('config', 'core.quotePath', 'false');
+    assert.equal(compare(root).changes, ' D appsscript.json/n');
+  });
+
+  // Charakteryzacja znanego ograniczenia: nazwa nieśledzonego pliku z linii statusu jest przycinana, więc `git add -N` dostaje nieistniejącą ścieżkę (#317).
+  test('znane ograniczenie: nieśledzony plik z wiodącym NBSP w nazwie kończy kontrolę błędem git add -N', () => {
+    const { root, g } = mini(BASE);
+    g('config', 'core.quotePath', 'false');
+    fs.writeFileSync(path.join(root, `${NBSP}Nb.gs`), 'x\n');
+    assert.throws(() => compare(root), /git add -N/);
+  });
+
+  test('drift tylko w śledzonym pliku przy zajętym indeksie: bez nieśledzonych plików nic nie sięga po blokadę indeksu', () => {
+    const { root } = mini(BASE);
+    fs.writeFileSync(path.join(root, 'GA4.gs'), 'function b() { return 1; }\n');
+    fs.writeFileSync(path.join(root, '.git', 'index.lock'), '');
+    const r = compare(root);
+    assert.equal(r.changes, ' M GA4.gs');
+    assert.match(r.patch, /\+function b\(\) \{ return 1; \}/);
+  });
+});
