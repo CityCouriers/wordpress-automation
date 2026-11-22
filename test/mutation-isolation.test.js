@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const os = require('node:os');
 const guard = require('../scripts/mutation/isolation-guard.js');
 const probes = require('../scripts/mutation/isolation-probe.js');
 const { runProbes, NETWORK_TARGETS, READ_PATHS, WRITE_DIRS } = probes;
@@ -109,6 +110,8 @@ const BAD = {
   '/tmp zamontowany drugi raz': [goodFacts({ mountinfo: `${GOOD_MOUNTS}1250 1230 0:99 / /tmp rw,nosuid - tmpfs tmpfs rw\n` }), /\/tmp jest zamontowany więcej niż raz/],
   '/proc jako katalog hosta': [goodFacts({ mountinfo: GOOD_MOUNTS.replace('/proc rw,nosuid,nodev,noexec,relatime - proc proc', '/proc rw,nosuid,nodev,noexec,relatime - ext4 /dev/sda1') }), /\/proc ma typ ext4, oczekiwano proc/],
   '/dev/shm jako katalog hosta': [goodFacts({ mountinfo: GOOD_MOUNTS.replace('/dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm', '/dev/shm rw,relatime - ext4 /dev/sda1') }), /\/dev\/shm ma typ ext4/],
+  'tmpfs pod /sys poza listą maskowanych ścieżek (katalog hosta podstawiony pod /sys)': [goodFacts({ mountinfo: `${GOOD_MOUNTS}1250 1234 0:20 / /sys/kernel/security rw,nosuid - tmpfs tmpfs rw\n` }), /\/sys\/kernel\/security ma typ tmpfs poza listą ścieżek maskowanych przez kontener/],
+  'tmpfs pod /proc poza listą maskowanych ścieżek': [goodFacts({ mountinfo: `${GOOD_MOUNTS}1250 1231 0:20 / /proc/host rw,nosuid - tmpfs tmpfs rw\n` }), /\/proc\/host ma typ tmpfs poza listą/],
   'podmontowanie pod /proc z dysku hosta': [goodFacts({ mountinfo: `${GOOD_MOUNTS}1250 1231 8:1 /home /proc/host ro,relatime - ext4 /dev/sda1 rw\n` }), /\/proc\/host ma typ ext4, oczekiwano proc\/tmpfs/],
   'podmontowanie pod /sys z dysku hosta': [goodFacts({ mountinfo: `${GOOD_MOUNTS}1250 1234 8:1 /home /sys/host ro,relatime - ext4 /dev/sda1 rw\n` }), /\/sys\/host ma typ ext4, oczekiwano sysfs\/cgroup\/cgroup2\/tmpfs/],
   'token w otoczeniu': [goodFacts({ envNames: ['PATH', 'GITHUB_TOKEN'] }), /poświadczeniami/],
@@ -593,7 +596,7 @@ test('requireIsolationFacts: złe fakty => kod 3; dobre => cisza', () => {
 
 const GUARDED = [
   ['run-file.js', ['Payloads.gs']], ['validate-selection.js', ['Payloads.gs']], ['trial.js', ['Payloads.gs']],
-  ['canary.js', []], ['zero-check.js', ['Payloads.gs']], ['run-tests.js', []], ['run-for-mutant.js', []]
+  ['canary.js', []], ['zero-check.js', ['Payloads.gs']], ['run-tests.js', []], ['run-for-mutant.js', []], ['vm-preload.js', []]
 ];
 const ARTIFACTS = ['.stryker-tmp', '.stryker-shadow', path.join('reports', 'mutation')];
 const ENVS = {
@@ -621,7 +624,8 @@ for (const [tool, args] of GUARDED) {
     const code = fs.readFileSync(path.join(ROOT, 'scripts', 'mutation', tool), 'utf8');
     const mainAt = code.search(/function main\(/);
     const lastRequire = code.split('\n').reduce((last, line, i) => (line.includes('require(') ? i : last), 0);
-    const body = mainAt >= 0 ? code.slice(mainAt) : code.split('\n').slice(lastRequire + 1).join('\n');
+    // vm-preload.js nie ma funkcji main: bramka jest na poziomie modułu, przed wszystkim innym w pliku.
+    const body = mainAt >= 0 || tool === 'vm-preload.js' ? code.slice(Math.max(mainAt, 0)) : code.split('\n').slice(lastRequire + 1).join('\n');
     // Orkiestratory przyjmują bramkę we wstrzykiwanych zależnościach (testy), ale domyślną jest prawdziwa bramka izolacji.
     const injected = /\bguard = requireIsolation(Facts)?\b/.test(body);
     if (/\bguard\(|\bguard =/.test(body)) assert.ok(injected, 'domyślną bramką musi być requireIsolation');
@@ -663,4 +667,32 @@ test('canWriteIn: zamyka deskryptor utworzonego pliku próby dokładnie raz', ()
   }
   assert.equal(closed.length, 1);
   assert.equal(typeof closed[0], 'number');
+});
+
+test('maskowane ścieżki kontenera pod /proc i /sys (tmpfs) są dozwolone, każda z osobna; lista jest zamknięta', () => {
+  const masked = [
+    '/proc/acpi', '/proc/asound', '/proc/interrupts', '/proc/kcore', '/proc/keys', '/proc/latency_stats', '/proc/timer_list',
+    '/proc/timer_stats', '/proc/sched_debug', '/proc/scsi', '/sys/firmware', '/sys/devices/virtual/powercap'
+  ];
+  assert.deepEqual(guard.MASKED_PATHS, masked);
+  for (const point of masked) {
+    const mounts = `${GOOD_MOUNTS}1250 1231 0:20 / ${point} ro,nosuid - tmpfs tmpfs rw\n`;
+    assert.deepEqual(guard.evaluateFacts(goodFacts({ mountinfo: mounts })), [], point);
+  }
+});
+
+test('vm-preload.js wczytany przez --require poza izolatorem kończy proces kodem 3 przed uruchomieniem kodu, nie tylko jako samodzielne narzędzie', () => {
+  const marker = path.join(os.tmpdir(), `mut-preload-${process.pid}-${Date.now()}.txt`);
+  const code = `require('fs').writeFileSync(${JSON.stringify(marker)}, 'uruchomiono');`;
+  // Most pomiaru mutacyjnego: zinstrumentowany vm-preload.js w podprocesie bierze numer mutanta z global.__stryker__.
+  const bridge = path.join(os.tmpdir(), `mut-preload-bridge-${process.pid}-${Date.now()}.js`);
+  fs.writeFileSync(bridge, "globalThis.__stryker__ = Object.assign(globalThis.__stryker__ || {}, { activeMutant: process.env.MUT_OUTER_MUTANT === undefined ? '' : process.env.MUT_OUTER_MUTANT });\n");
+  const outer = process.env.__STRYKER_ACTIVE_MUTANT__ === undefined ? {} : { MUT_OUTER_MUTANT: process.env.__STRYKER_ACTIVE_MUTANT__ };
+  const r = spawnSync(process.execPath, ['--require', bridge, '--require', path.join(ROOT, 'scripts', 'mutation', 'vm-preload.js'), '-e', code], {
+    cwd: ROOT, encoding: 'utf8', env: { PATH: process.env.PATH || process.env.Path || '', CI: 'true', MUTATION_ISOLATED: '1', ...outer }, timeout: 60000
+  });
+  fs.rmSync(bridge, { force: true });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /no-go-izolacja: vm-preload\.js nie startuje mutantów/);
+  assert.equal(fs.existsSync(marker), false, 'kod po wczytaniu preloadu nie mógł się wykonać');
 });

@@ -15,7 +15,7 @@ Mutanty wykonują zmutowany kod, więc przed ich startem muszą być spełnione 
 | Warunek | Jak jest wymuszony | Jak jest sprawdzony przed mutantami |
 | --- | --- | --- |
 | Brak sieci | kontener z `--network none` | w `/proc/net/dev` i `os.networkInterfaces()` jest tylko `lo`, brak tras w `/proc/net/route`; sonda: połączenia z 5 adresami (IPv4, IPv6, adres metadanych) i rozwiązanie nazwy muszą się nie udać |
-| Zapis tylko w katalogu przebiegu | `--read-only`, jedyne zapisywalne montowanie to `/work` oraz `/tmp` (tmpfs) | `/proc/self/mountinfo`: katalog główny `ro` i jeden; `/work` jedno, `rw`, ze źródłem kończącym się na `/mutation-run`; każdy inny punkt tylko z tabeli (typ systemu plików: `/proc` proc, `/dev` tmpfs, `/dev/pts` devpts, `/tmp` tmpfs...; `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` tylko z katalogu kontenera), podmontowania pod `/proc` i `/sys` tylko typów systemowych; wszystko inne (HOME, gniazdo dockera, katalog hosta pod `/dev`) to odmowa; sonda: utworzenie pliku w `/`, `/etc`, `/usr`, `/var`, `/root` i w HOME musi być odmówione |
+| Zapis tylko w katalogu przebiegu | `--read-only`, jedyne zapisywalne montowanie to `/work` oraz `/tmp` (tmpfs) | `/proc/self/mountinfo`: katalog główny `ro` i jeden; `/work` jedno, `rw`, ze źródłem kończącym się na `/mutation-run`; każdy inny punkt tylko z tabeli (typ systemu plików: `/proc` proc, `/dev` tmpfs, `/dev/pts` devpts, `/tmp` tmpfs...; `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` tylko z katalogu kontenera), podmontowania pod `/proc` i `/sys` tylko typów systemowych, a tmpfs tam wyłącznie na zamkniętej liście ścieżek maskowanych przez kontener (`MASKED_PATHS`); wszystko inne (HOME, gniazdo dockera, katalog hosta pod `/dev`) to odmowa; sonda: utworzenie pliku w `/`, `/etc`, `/usr`, `/var`, `/root` i w HOME musi być odmówione |
 | Odczyt tylko w katalogu przebiegu | brak innych montowań | sonda: znane ścieżki hosta i plik kontrolny hosta podany przez workflow muszą być niewidoczne |
 | Brak uprawnień | `--user 1000:1000`, `--cap-drop ALL`, `--security-opt no-new-privileges`, domyślny seccomp | `/proc/self/status`: UID i GID (także grupy dodatkowe) ≠ 0, `CapEff`/`CapPrm`/`CapBnd` zerowe, `NoNewPrivs: 1`, `Seccomp: 2` |
 | Brak poświadczeń | kontener bez `-e` poza `TZ`, bez `--env-file`; checkout z `persist-credentials: false` | nazwy zmiennych środowiska tylko z allowlisty, żadnych zgodnych z poświadczeniami ani `GIT_*` |
@@ -34,11 +34,20 @@ Kod: `scripts/mutation/isolation-guard.js` (fakty), `scripts/mutation/isolation-
   żeby raport pochodził wyłącznie z tego przebiegu.
 - Każde narzędzie, które startuje mutanty (`trial.js`, `run-file.js`, `validate-selection.js`, `canary.js`, `zero-check.js`),
   samo wywołuje bramkę. Komendy testowe Strykera (`run-tests.js`, `run-for-mutant.js`) sprawdzają fakty przy każdym
-  uruchomieniu, więc nawet surowe `npx stryker run` na maszynie deweloperskiej kończy się odmową już na suchym przebiegu.
+  uruchomieniu, więc surowe `npx stryker run` z konfiguracją repozytorium na maszynie deweloperskiej kończy się odmową już na suchym
+  przebiegu. Komenda testowa podana Strykerowi z wiersza poleceń (`--commandRunner.command`) ma pierwszeństwo przed konfiguracją, więc
+  bramkę ma też `vm-preload.js`: to jedyna droga, którą zmutowany kod trafia do testów (przekierowanie `src/*.gs` na kopię cienia),
+  a sprawdza fakty izolacji przy każdym wczytaniu. Kto ominie `vm-preload.js` własną komendą, nie uruchamia już mutantów tego
+  potoku; zakaz uruchamiania Strykera poza izolatorem pozostaje też regułą pracy (`CLAUDE.md`).
+- Narzędzia, które mutantów nie startują (`prepare-shadow.js`, `coverage-map.js`), bramki nie mają: pracują na niezmutowanym kodzie.
 - Cały łańcuch procesów (Stryker, loader, testy) działa w tym samym kontenerze, z minimalnym środowiskiem (`safe-env.js`).
 - Sondy są skończone, więc „nic nie wykryto” nie dowodzi izolacji; dowodem jest mechanizm (flagi kontenera, sprawdzane
   w teście `test/mutation-workflow.test.js`) plus fakty z `/proc` procesu. Sondy łapią błąd konfiguracji, którego
   fakty nie widzą.
+
+Bramka nie sprawdza przestrzeni nazw PID, `--device`, AppArmor ani `--ipc`/`--uts`; te flagi zatrzymuje tylko przypięcie
+`docker run` w `test/mutation-workflow.test.js`. Lista `MASKED_PATHS` nie odróżnia katalogu hosta podstawionego dokładnie pod
+jedną z maskowanych ścieżek od prawdziwej maski, więc także tu obrona opiera się na przypiętym `docker run`.
 
 **Co NIE jest sprawdzone.** Bramka i workflow były dotąd uruchamiane wyłącznie w testach z atrapami faktów (zapisanymi
 na podstawie formatu `/proc` kontenera). Na prawdziwym kontenerze Dockera nie były uruchomione: to zadanie pierwszego
@@ -59,7 +68,8 @@ mutantach) czyta wyłącznie krok zbierający: kopiuje zwykłe pliki `.json` i `
 katalog przebiegu, a podsumowanie i wysyłka artefaktu czytają tylko z tej kopii. Repozytorium z `.npmrc` kończy
 przebieg odmową przed instalacją zależności.
 Wejścia: `file` (np. `Payloads.gs`), `suite`, `concurrency`. GitHub uruchamia ręcznie tylko workflow obecny na gałęzi
-domyślnej, więc pierwsze uruchomienie jest możliwe dopiero po scaleniu pliku, **i wymaga jawnej zgody właściciela
+domyślnej, więc pierwsze uruchomienie jest możliwe dopiero po scaleniu pliku (potem uruchomienie z innej gałęzi wykonuje wersję
+pliku z tej gałęzi, co wymaga uprawnień zapisu do repozytorium), **i wymaga jawnej zgody właściciela
 zapisanej w komentarzu zgłoszenia #253**.
 
 W kontenerze `scripts/mutation/trial.js <Plik.gs>` wykonuje kolejno:
@@ -141,7 +151,7 @@ Timeout (tabela Timeoutów: brak):
 
 | Plik | Zabite | Ocalałe |
 | --- | ---: | ---: |
-| `isolation-guard.js` | 422 | 0 |
+| `isolation-guard.js` | 443 | 0 |
 | `isolation-probe.js` | 129 | 0 |
 | `report.js` | 191 | 0 |
 | `zero-check.js` | 168 | 0 |
@@ -156,7 +166,7 @@ Timeout (tabela Timeoutów: brak):
 | `selection.js` | 71 | 0 |
 | `lcov.js` | 67 | 0 |
 | `run-for-mutant.js` | 45 | 0 |
-| `vm-preload.js` | 40 | 0 |
+| `vm-preload.js` | 41 | 0 |
 | `prepare-shadow.js` | 28 | 0 |
 | `safe-env.js` | 27 | 0 |
 | `run-tests.js` | 24 | 0 |

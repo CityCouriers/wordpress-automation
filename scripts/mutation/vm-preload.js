@@ -1,11 +1,18 @@
 'use strict';
 
-// Pomost między StrykerJS a harnessem testów (pilot mutacji, zob. docs/quality/mutation-pilot.md).
+// Pomost między StrykerJS a harnessem testów (zob. docs/quality/mutation.md).
 //
 // 1. StrykerJS nie ma parsera dla `.gs`, więc mutowane są kopie `.stryker-shadow/<Nazwa>.js`.
 //    Odczyt `src/<Nazwa>.gs` przez harness przekierowujemy na kopię, o ile istnieje.
 // 2. Źródła działają w kontekście `vm`, który nie widzi `process.env`, więc zinstrumentowany
 //    kod nie dowiedziałby się, który mutant jest aktywny. Wstrzykujemy go do kontekstu.
+//
+// Ten plik jest jedyną drogą, którą zmutowany kod trafia do testów (przekierowanie src/*.gs na kopię cienia),
+// więc sprawdza fakty izolacji przy każdym wczytaniu: komenda testowa podana Strykerowi z wiersza poleceń
+// (`--commandRunner.command`) na maszynie bez izolatora kończy się odmową (kod 3), a nie mutantami na hoście.
+const { requireIsolationFacts } = require('./isolation-guard.js');
+requireIsolationFacts('vm-preload.js');
+
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');

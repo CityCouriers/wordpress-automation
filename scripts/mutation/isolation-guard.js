@@ -42,6 +42,15 @@ const MOUNT_POLICY = {
 };
 /** Podmontowania doklejane pod /proc i /sys (maskowanie ścieżek): wyłącznie typy systemowe. */
 const MOUNT_FAMILIES = { '/proc/': ['proc', 'tmpfs'], '/sys/': ['sysfs', 'cgroup', 'cgroup2', 'tmpfs'] };
+/**
+ * Ścieżki pod /proc i /sys, które środowisko uruchomieniowe kontenera maskuje montowaniem tmpfs (domyślne maskowane
+ * ścieżki runc). Montowanie tmpfs w innym miejscu tych drzew to odmowa: tak wyglądałby katalog hosta (np. /run)
+ * podstawiony pod /sys/kernel/security, a sondy odczytu sprawdzają tylko stałe ścieżki.
+ */
+const MASKED_PATHS = [
+  '/proc/acpi', '/proc/asound', '/proc/interrupts', '/proc/kcore', '/proc/keys', '/proc/latency_stats', '/proc/timer_list',
+  '/proc/timer_stats', '/proc/sched_debug', '/proc/scsi', '/sys/firmware', '/sys/devices/virtual/powercap'
+];
 const ENV_ALLOWED = ['PATH', 'HOME', 'HOSTNAME', 'TZ', 'LANG', 'LC_ALL', 'TERM', 'PWD', 'SHLVL', '_', 'NODE_VERSION', 'YARN_VERSION'];
 const SECRET_NAME = /TOKEN|SECRET|PASS|KEY|CRED|AUTH|^CC_|^CLAUDE|^GOOGLE|^GH_|^GITHUB|^NPM_|^RUNNER_|^ACTIONS_|^GIT_/i;
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -175,6 +184,7 @@ function mountPointFailure(m) {
   }
   const family = Object.keys(MOUNT_FAMILIES).find(prefix => m.mountPoint.startsWith(prefix));
   if (family) {
+    if (m.fsType === 'tmpfs' && !MASKED_PATHS.includes(m.mountPoint)) return `punkt montowania ${m.mountPoint} ma typ tmpfs poza listą ścieżek maskowanych przez kontener`;
     return MOUNT_FAMILIES[family].includes(m.fsType) ? null : `punkt montowania ${m.mountPoint} ma typ ${m.fsType}, oczekiwano ${MOUNT_FAMILIES[family].join('/')}`;
   }
   return `nieznany punkt montowania ${m.mountPoint} (dozwolone: ${WORKDIR}, /tmp i punkty kontenera)`;
@@ -280,6 +290,6 @@ async function requireIsolation(tool, deps = {}) {
 }
 
 module.exports = {
-  WORKDIR, ENV_ALLOWED, SECRET_NAME, readText, interfaceNames, numericId, readFacts, parseStatus, parseMountinfo, parseNetDev,
+  WORKDIR, MASKED_PATHS, ENV_ALLOWED, SECRET_NAME, readText, interfaceNames, numericId, readFacts, parseStatus, parseMountinfo, parseNetDev,
   routeEntries, evaluateFacts, evaluateChildFacts, requireIsolationFacts, verifyIsolation, requireIsolation
 };

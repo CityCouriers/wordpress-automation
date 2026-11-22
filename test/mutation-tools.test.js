@@ -19,6 +19,8 @@ function makeTree(files = {}) {
   fs.mkdirSync(path.join(dir, 'scripts', 'mutation'), { recursive: true });
   for (const f of fs.readdirSync(REAL).filter(n => n.endsWith('.js') && !n.endsWith('.test.js'))) fs.copyFileSync(path.join(REAL, f), path.join(dir, 'scripts', 'mutation', f));
   const guard = path.join(dir, 'scripts', 'mutation', 'isolation-guard.js');
+  // Drzewo testowe nie jest izolatorem: kopia strażnika w nim to atrapa (dotyczy też procesów potomnych, np. vm-preload.js).
+  fs.writeFileSync(guard, 'module.exports = { requireIsolationFacts() {}, requireIsolation: async () => [] };\n');
   fs.writeFileSync(path.join(dir, 'stub-guard.js'), `require.cache[${JSON.stringify(guard)}] = { id: ${JSON.stringify(guard)}, filename: ${JSON.stringify(guard)}, loaded: true, exports: { requireIsolationFacts() {}, requireIsolation: async () => [] } };\n`);
   fs.writeFileSync(path.join(dir, 'stryker-bridge.js'), BRIDGE);
   for (const [rel, content] of Object.entries(files)) {
