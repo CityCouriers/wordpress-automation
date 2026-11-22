@@ -147,6 +147,9 @@ skryptach przechodzą na polski przy okazji kolejnych zmian, bez masowego tłuma
   `test/review-ack.test.js`, `test/pr-template.test.js`, `test/issue-audit-gate.test.js`
   (z `test/issue-audit-sides.test.js` i `test/issue-audit-fetch.test.js`).
 - Standardy: [docs/quality/testing-standard.md](docs/quality/testing-standard.md).
+- Testy mutacyjne `src/*.gs` (#253): próba na Linuksie, tylko `workflow_dispatch` w kontenerze bez sieci; kontrakt izolacji, kanarek i kontrola zerowa
+  w [docs/quality/mutation.md](docs/quality/mutation.md). Nie uruchamiaj `stryker run` ani narzędzi z `scripts/mutation/` poza tym kontenerem
+  (bramka odmówi) i nie szukaj sposobu na jej zdjęcie: zmiana bramki wymaga osobnego audytu. Pierwsze uruchomienie w CI wymaga zgody właściciela.
 
 ## Rób / nie rób
 
