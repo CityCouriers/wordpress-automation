@@ -14,7 +14,9 @@ Stryker 10.1.1, runner `command` (`node --test test/apps-script-compare.test.js 
 
 Sumy kontrolne raportów JSON (artefakty lokalne): kontrola zerowa krok 2 `6f7e328cd83a2fcccd8635ce5e3c9b67623542bd6bdc51368ba76298fd8bd043`, pomiar końcowy `92deff471ab65213f8b43fb234ce55c9ec0938fc1a60075ed82a123dfa50af35`.
 
-Pomiar końcowy dotyczy HEAD `04435b5`. Późniejsze commity tej gałęzi zmieniają wyłącznie komentarze w teście i dokumentację (kod pliku i asercje bez zmian).
+Pomiar końcowy dotyczy HEAD `04435b5`. Późniejsze commity tej gałęzi zmieniają komentarze w teście i dokumentację, a od rundy 2 także jeden test (mutant 10, 117:9, patrz „Test mutanta 10”); kod pliku bez zmian.
+
+Pomiar zawężony po zmianie testu mutanta 10 (zakres, którego zmiana dotyka: `normalizeIndexTrailingNewline`, linie 113-122, `stryker run` z `mutate: …:113-122`, te same dwa pliki testów, kod pliku identyczny z `main`): **33 mutanty, 32 zabite, 1 ocalały (114:19, równoważny, audyt #4)**, brak Timeoutów. sha256 raportu (artefakt lokalny) `f6a62bb7646e2caf55d3a898143bdaa9e1ea9a792ca06eacad3b8dd7eaa71a48`. Pozostałe mutanty pliku leżą poza zakresem zmienionego testu (zmieniony test wykonuje tylko `compare()` na małym repozytorium z ścieżką normalizacji indeksu), więc ich wynik z pomiaru pełnego na `04435b5` pozostaje w mocy.
 
 ## Tabela 22 mutantów
 
@@ -31,7 +33,7 @@ Położenie to linia:kolumna według Stryker.
 | 7 | 94:18 | `'.'` → `""` | **równoważny** | audyt #3 |
 | 8 | 114:19 | usunięcie `.filter(Boolean)` | **równoważny** | audyt #4 |
 | 9 | 114:93 | `s.trim()` → `s` | zabity | „znane ograniczenie: … wiodącą spacją albo NBSP …” |
-| 10 | 117:9 | `shown.status !== 0` → `false` | zabity | „znane ograniczenie: … większy niż 1 MiB …” |
+| 10 | 117:9 | `shown.status !== 0` → `false` | zabity | „znane ograniczenie: gdy git show kończy się niepowodzeniem (ENOBUFS) …” (atrapa wyniku `spawnSync`, patrz niżej) |
 | 11 | 131:7 | usunięcie `.trim()` przy `ls-files Version.gs` | **równoważny** | audyt #7 |
 | 12 | 140:18 | `l.trim()` → `l` | **równoważny** | audyt #8 |
 | 13 | 140:31 | `startsWith('??')` → `endsWith('??')` | zabity | „zmiana tylko w indeksie, której ścieżka kończy się na ?? …” |
@@ -64,6 +66,12 @@ Trzy mutanty (114:78, 121:86, 121:93) w pierwszym pomiarze końcowym przy obcią
 ## Testy charakteryzujące znane ograniczenia
 
 Trzy testy (mutanty 9, 10, 20) zapisują obecne, błędne zachowanie kodu, bo jedyną obserwowalną różnicą mutanta jest właśnie to ograniczenie. Naprawy poza zakresem #312: #317 (nazwy plików z `git status`/`ls-files` przycinane i bez `-z`) oraz #318 (limit 1 MiB wyniku gita). Naprawa odwróci asercje tych testów.
+
+### Test mutanta 10 (117:9): atrapa zamiast pliku 1 MiB + 1 B
+
+Pierwsza wersja tego testu używała prawdziwego pliku o rozmiarze równym limitowi `maxBuffer` plus jeden bajt i na tym samym HEAD (`b5e314b`) raz przeszła, raz padła w CI na Linuksie (`'' !== ' M Big.gs'`). Przyczyna: gdy wynik `spawnSync` przekracza `maxBuffer`, Node ustawia `error: ENOBUFS` i zabija proces; `status` jest `null`, gdy git jeszcze żył, a `0`, gdy zdążył wyjść (stdout jest wtedy pełny, plik jest normalizowany i test dostaje `''`). Przy rozmiarze tuż nad limitem ostatni fragment danych jest mały, więc wynik zależy od wyścigu. Zmierzone lokalnie (Windows): `git show` bloba 1 048 577 B dało `status=null` i pełny stdout 200 razy na 200, a blob 3 MiB `status=null` i stdout obcięty; samego wyścigu na Linuksie lokalnie nie odtworzono (brak Node pod Linuksem), jest to wniosek z przebiegu CI i z dokumentacji Node.
+
+Większy plik nie pomaga: mutant `status !== 0` → `false` jest obserwowalny tylko wtedy, gdy stdout jest pełny mimo niepowodzenia, a to zachodzi dokładnie na granicy limitu. Test używa więc małego pliku i atrapy `spawnSync` dla `git show` zwracającej to, co Node zwraca przy ENOBUFS (`status: null`, `error: ENOBUFS`, pełny stdout), a w drugiej połowie sprawdza, że bez atrapy ten sam plik jest normalizowany. Nie zależy to od rozmiaru, platformy ani wyścigu. Dowód: mutant 117:9 nałożony na kopię daje czerwony test (`actual: ''`), oryginał zielony; 50 uruchomień pod rząd testu i pozostałych testów charakteryzujących: 50 zielonych. Pozostałe nowe testy (nazwy ze spacją i NBSP, deskryptor stdin, blokada indeksu, wpisy tylko w indeksie) nie zależą od rozmiaru ani czasu: ich wynik wynika z deterministycznego zachowania gita i systemu plików, a w CI przeszły na Linuksie.
 
 ## Ograniczenia platformowe
 

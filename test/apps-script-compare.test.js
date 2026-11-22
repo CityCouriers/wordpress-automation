@@ -501,15 +501,32 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.match(changes, /Nb\.gs/);
   });
 
-  // Charakteryzacja znanego ograniczenia: `git show` czyta przez spawnSync z limitem 1 MiB; większy blob jest pomijany (status null). Naprawa: #318.
-  test('znane ograniczenie: śledzony plik większy niż 1 MiB bez końcowej nowej linii nie jest normalizowany', () => {
-    const size = 1048577;
-    let content = '';
-    while (content.length < size) content += 'x'.repeat(79) + '\n';
-    content = content.slice(0, size - 1) + 'y';
-    const { root } = mini({ 'Big.gs': content, 'Kod.gs': 'function a() {}\n' });
-    fs.writeFileSync(path.join(root, 'Big.gs'), content + '\n');
-    assert.equal(compare(root).changes, ' M Big.gs');
+  // Charakteryzacja znanego ograniczenia (#318): gdy `git show` kończy się niepowodzeniem, nawet z pełnym stdout, plik jest pomijany i nie jest normalizowany.
+  // Prawdziwy blob 1 MiB + 1 B nie nadaje się do tego testu: spawnSync przekraczający maxBuffer ustawia error ENOBUFS, ale status zależy od wyścigu
+  // (null, gdy Node zdąży zabić gita; 0, gdy git zdążył już wyjść; na Linuksie w CI obserwowano oba wyniki dla tego samego kodu). Dlatego wynik
+  // spawnSync dla `git show` jest tu atrapą zgodną z opisem Node dla ENOBUFS (status null, error ENOBUFS, stdout z pełną zawartością).
+  test('znane ograniczenie: gdy git show kończy się niepowodzeniem (ENOBUFS), plik bez końcowej nowej linii nie jest normalizowany', () => {
+    const { root } = mini({ 'Big.gs': 'x', 'Kod.gs': 'function a() {}\n' });
+    fs.writeFileSync(path.join(root, 'Big.gs'), 'x\n');
+    const cp = require('child_process');
+    const real = cp.spawnSync;
+    cp.spawnSync = function (cmd, args) {
+      const r = real.apply(this, arguments);
+      if (cmd === 'git' && args[0] === 'show') {
+        return { ...r, status: null, error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }) };
+      }
+      return r;
+    };
+    let patched;
+    try {
+      delete require.cache[SCRIPT];
+      patched = require(SCRIPT);
+    } finally {
+      cp.spawnSync = real;
+      delete require.cache[SCRIPT];
+    }
+    assert.equal(patched.compare(root).changes, ' M Big.gs');
+    assert.equal(compare(root).changes, '', 'bez atrapy ten sam plik jest normalizowany (sama końcowa nowa linia nie jest driftem)');
   });
 
   test('zmiana tylko w indeksie, której ścieżka kończy się na ?? (pod appsscript.json/), nie jest driftem', () => {
