@@ -10,7 +10,8 @@
  * Zakres deklaracji: test chroni przed POMYŁKĄ i regresją w zatwierdzonym kodzie. Nie chroni przed osobą,
  * która na gałęzi zmienia sam YAML i sam test (zaakceptowane ryzyko, decyzja właściciela w #296, wariant A).
  * Parser jest tekstowy, więc zamiast zgadywać nieobsługiwany zapis YAML, test go ODRZUCA (`checkFormats`):
- * zapis przepuszczony po cichu byłby obejściem reguł.
+ * zapis przepuszczony po cichu byłby obejściem reguł. Wzorce wierszy `uses:`, `permissions:`, `run:`/`script:` i wpisów
+ * `zizmor.yml` są celowo bez `$` na końcu: dopisek za wartością ma dawać zarzut, a nie sprawiać, że wiersz jest pomijany.
  *
  * Zakres plików: wszystkie workflow'y poza `apps-script-drift.yml` i `deploy-apps-script.yml`; te dwa
  * (workflow'y z sekretami Apps Script) obejmuje PR-2 zgłoszenia #296 i do tego czasu są na liście
@@ -144,6 +145,13 @@ function checkFormats(text, name) {
   if (/(?:^\s*|:\s+|-\s+)(?:&|\*)[A-Za-z_]/m.test(code) || /^\s*<<\s*:/m.test(code)) bad.push(`${name}: kotwica, alias albo merge key nieobsługiwane przez test`);
   if (/\\(?:u0024|x24|U00000024)/i.test(code)) bad.push(`${name}: znak $ zapisany sekwencją ucieczki YAML (ukryte wyrażenie)`);
   if (/^on:[ \t]+\S/m.test(code)) bad.push(`${name}: wyzwalacze w formie skróconej (on: ...) nieobsługiwane przez test`);
+  // Test dzieli tekst po LF; parser YAML kończy linię też na samotnym CR, NEL, LS i PS (komentarz kończy się tam, gdzie test widzi jego dalszy ciąg).
+  if (/\r(?!\n)|[\u0085\u2028\u2029]/.test(text)) bad.push(`${name}: znak końca linii inny niż LF (CR, NEL, LS, PS) nieobsługiwany przez test`);
+  if (/^\s*(?:-\s+)?\?(?:\s|$)/m.test(code)) bad.push(`${name}: klucz jawny (? ...) nieobsługiwany przez test`);
+  // Kontrole `uses` i `shell` czytają wartość z tej samej linii: wartość w następnej linii albo blok `|`/`>` omijałaby je.
+  if (/^\s*(?:-\s+)?(?:uses|shell):\s*(?:[|>][+\-\d]*)?\s*(?:#.*)?$/m.test(code)) bad.push(`${name}: uses albo shell bez wartości w tej samej linii nieobsługiwane przez test`);
+  // Ukośnik na końcu linii w cudzysłowie skleja linie YAML i mógłby rozciąć `${{` na dwie linie.
+  if (/\\$/m.test(code)) bad.push(`${name}: ukośnik na końcu linii (ucieczka końca linii w cudzysłowie) nieobsługiwany przez test`);
   return bad;
 }
 
@@ -170,6 +178,7 @@ function permissionLines(text) {
     // komentarz po wartości albo sam komentarz po `permissions:` (np. `permissions: # powód`) nie jest wartością
     const rest = m[2].replace(/(?:^|\s)#.*/, '').trim();
     if (rest) { found.push({ top, scalar: rest, line: i + 1 }); return; }
+    const before = found.length;
     for (let j = i + 1; j < lines.length; j++) {
       // Pusta linia i komentarz między uprawnieniami nie kończą bloku.
       if (lines[j].trim() === '' || isComment(lines[j])) continue;
@@ -180,6 +189,8 @@ function permissionLines(text) {
       const commented = Boolean(p[4]) || isComment(lines[j - 1]);
       found.push({ top, perm: p[2], value: p[3], commented, line: j + 1 });
     }
+    // `permissions:` bez wartości i bez bloku (null) nie jest zapisem, który test umie ocenić
+    if (found.length === before) found.push({ top, empty: true, line: i + 1 });
   });
   return found;
 }
@@ -188,7 +199,8 @@ function permissionLines(text) {
 function checkPermissions(text, name) {
   const bad = [];
   for (const p of permissionLines(text)) {
-    if (p.unsupported) bad.push(`${name}:${p.line}: nieobsługiwana linia uprawnień: ${p.unsupported}`);
+    if (p.empty) bad.push(`${name}:${p.line}: permissions bez wartości i bez bloku`);
+    else if (p.unsupported) bad.push(`${name}:${p.line}: nieobsługiwana linia uprawnień: ${p.unsupported}`);
     else if (p.scalar !== undefined) { if (p.scalar !== '{}') bad.push(`${name}:${p.line}: permissions: ${p.scalar} (dozwolone tylko blok albo {})`); }
     else {
       if (p.top && p.value === 'write') bad.push(`${name}:${p.line}: ${p.perm}: write na poziomie workflow`);
@@ -839,5 +851,44 @@ describe('dokładne wyniki kontroli: komunikaty, numery linii, granice wcięć i
     assert.ok(checkDependabot('\tx\n').includes('dependabot.yml: tabulator w YAML'));
     assert.deepEqual(checkDependabot('version: 2\nupdates:\n  -     package-ecosystem: npm\n    # powód\n    cooldown:\n      default-days: 3\n'), ['dependabot.yml: npm: cooldown.default-days=3 < 7']);
     assert.deepEqual(triggers('name: X\n\non:\n\npermissions:\n  contents: read\n'), []);
+  });
+
+  test('obejścia z przeglądu: końce linii inne niż LF, klucz jawny, uses i shell w następnej linii, ukośnik na końcu linii, puste permissions', () => {
+    const eol = 'f: znak końca linii inny niż LF (CR, NEL, LS, PS) nieobsługiwany przez test';
+    assert.deepEqual(checkFormats('a: 1\r# komentarz\rissues: write\n', 'f'), [eol]);
+    assert.deepEqual(checkFormats('a: 1\u0085b\n', 'f'), [eol]);
+    assert.deepEqual(checkFormats('a: 1\u2028b\n', 'f'), [eol]);
+    assert.deepEqual(checkFormats('a: 1\u2029b\n', 'f'), [eol]);
+    assert.deepEqual(checkFormats('a: 1\r\nb: 2\r\n', 'f'), []);
+    assert.deepEqual(checkZizmorConfig('rules:\n  dangerous-triggers:\n    ignore:\n      # p\n      - review-gate.yml\r      - ci.yml\n').filter(x => /końca linii/.test(x)), [eol.replace('f:', 'zizmor.yml:')]);
+    const key = 'f: klucz jawny (? ...) nieobsługiwany przez test';
+    assert.deepEqual(checkFormats('jobs:\n  a:\n    steps:\n      - ? run\n        : echo\n', 'f'), [key]);
+    assert.deepEqual(checkFormats('a:\n  ? uses\n  : x\n', 'f'), [key]);
+    assert.deepEqual(checkFormats('a:\n  ?\n', 'f'), [key]);
+    assert.deepEqual(checkFormats('a: ?x\nname: what?\n', 'f'), []);
+    const val = 'f: uses albo shell bez wartości w tej samej linii nieobsługiwane przez test';
+    assert.deepEqual(checkFormats('steps:\n  - uses:\n      actions/setup-node@v4\n', 'f'), [val]);
+    assert.deepEqual(checkFormats('steps:\n  - uses:  # komentarz\n      x/y@v1\n', 'f'), [val]);
+    assert.deepEqual(checkFormats('steps:\n  - shell: >-\n      bash -c "${{ github.event.issue.title }}"\n', 'f'), [val]);
+    assert.deepEqual(checkFormats('steps:\n  - shell: |2+\n      bash\n', 'f'), [val]);
+    assert.deepEqual(checkFormats('steps:\n  - uses: x/y@v1\n    shell: bash\n', 'f'), []);
+    const bs = 'f: ukośnik na końcu linii (ucieczka końca linii w cudzysłowie) nieobsługiwany przez test';
+    assert.deepEqual(checkFormats('steps:\n  - run: "echo $\\\n      {{ github.event.issue.title }}"\n', 'f'), [bs]);
+    assert.deepEqual(checkFormats('steps:\n  - run: |\n      echo a \\\n      echo b\n', 'f'), []);
+    assert.deepEqual(checkFormats('a: b\\c\n', 'f'), []);
+    assert.deepEqual(checkPermissions('permissions:\n', 'f'), ['f:1: permissions bez wartości i bez bloku']);
+    assert.deepEqual(checkPermissions('jobs:\n  a:\n    permissions: # powód\n    steps: []\n', 'f'), ['f:3: permissions bez wartości i bez bloku']);
+    assert.deepEqual(checkPermissions('permissions:\n  # tylko komentarz\n', 'f'), ['f:1: permissions bez wartości i bez bloku']);
+    assert.deepEqual(checkPermissions('permissions:\n  contents: read\n', 'f'), []);
+  });
+
+  test('obejścia z przeglądu: granice wzorców (odstępy po myślniku, koniec tekstu, kotwica początku, klucz bez myślnika)', () => {
+    const key = 'f: klucz jawny (? ...) nieobsługiwany przez test';
+    const val = 'f: uses albo shell bez wartości w tej samej linii nieobsługiwane przez test';
+    assert.deepEqual(checkFormats('steps:\n  -  ? run\n', 'f'), [key]);
+    assert.deepEqual(checkFormats('a:\n  ?', 'f'), [key]);
+    assert.deepEqual(checkFormats('name: reuses:\n', 'f'), []);
+    assert.deepEqual(checkFormats('steps:\n  - name: a\n    uses:\n      x/y@v1\n', 'f'), [val]);
+    assert.deepEqual(checkFormats('steps:\n  -  uses:\n      x/y@v1\n', 'f'), [val]);
   });
 });
