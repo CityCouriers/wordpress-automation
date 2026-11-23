@@ -20,22 +20,27 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const WORKFLOWS = path.join(ROOT, '.github', 'workflows');
-const read = rel => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
+const readIn = (root, rel) => fs.readFileSync(path.join(root, rel), 'utf8').replace(/\r\n/g, '\n');
+const read = rel => readIn(ROOT, rel);
+/** Pliki YAML z listy nazw katalogu, posortowane (kolejność zwracana przez system plików nie jest gwarantowana). */
+const workflowFiles = names => names.filter(f => /\.ya?ml$/.test(f)).sort();
 
 /** Workflow'y z sekretami Apps Script: zakres PR-2 zgłoszenia #296 (przypięcia, checkouty, nazwy). */
 const ODROCZONE = ['apps-script-drift.yml', 'deploy-apps-script.yml'];
-const WORKFLOW_FILES = fs.readdirSync(WORKFLOWS).filter(f => /\.ya?ml$/.test(f)).sort();
+const WORKFLOW_FILES = workflowFiles(fs.readdirSync(WORKFLOWS));
 const OBJETE = WORKFLOW_FILES.filter(f => !ODROCZONE.includes(f));
 /** Nazwy checków wymaganych przez ochronę gałęzi i przez agregat jakości; zmiana nazwy joba je zrywa. */
 const WYMAGANE_NAZWY = ['validate', 'secret-scan', 'quality-gate', 'pr-title', 'review-ack'];
 
+/** Linia komentarza; `undefined` (brak linii nad pierwszą) nie jest komentarzem (RegExp.test rzutuje na tekst „undefined”). */
 const isComment = line => /^\s*#/.test(line);
 const withoutComments = text => text.split('\n').filter(l => !isComment(l)).join('\n');
-const indentOf = line => /^\s*/.exec(line)[0].length;
+const indentOf = line => line.length - line.trimStart().length;
 
 /** Blok najwyższego poziomu `klucz:` (linie wcięte pod nim), bez samej linii klucza. */
 function topBlock(text, key) {
@@ -43,7 +48,10 @@ function topBlock(text, key) {
   const i = lines.findIndex(l => l === `${key}:` || l.startsWith(`${key}: `));
   if (i < 0) return null;
   const out = [];
-  for (let j = i + 1; j < lines.length && (lines[j] === '' || /^\s/.test(lines[j]) || isComment(lines[j])); j++) out.push(lines[j]);
+  for (const l of lines.slice(i + 1)) {
+    if (!(l === '' || /^\s/.test(l) || isComment(l))) break;
+    out.push(l);
+  }
   return out;
 }
 
@@ -100,16 +108,16 @@ function blockOf(stepText, key) {
 /** Zakresy linii bloków `run:` i `script:` (zawartość, bez linii klucza) jako [od, do). */
 function scriptRanges(lines) {
   const ranges = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^(\s*)(?:- )?(run|script):\s*(.*)$/.exec(lines[i]);
-    if (!m || isComment(lines[i])) continue;
-    const indent = m[1].length + (lines[i].trim().startsWith('- ') ? 2 : 0);
+  lines.forEach((line, i) => {
+    const m = /^(\s*)(?:- )?(run|script):\s*(.*)/.exec(line);
+    if (!m || isComment(line)) return;
+    const indent = m[1].length + (line.trim().startsWith('- ') ? 2 : 0);
     let j = i + 1;
     for (; j < lines.length; j++) {
       if (lines[j].trim() !== '' && indentOf(lines[j]) <= indent) break;
     }
     ranges.push({ from: i, to: j, inline: m[3] });
-  }
+  });
   return ranges;
 }
 
@@ -122,7 +130,7 @@ function scriptBlocks(text) {
 /** Tekst bez komentarzy i bez treści skryptów: to, co ma strukturę YAML. */
 function yamlOnly(text) {
   const lines = text.split('\n');
-  for (const r of scriptRanges(lines)) for (let i = r.from + 1; i < r.to; i++) lines[i] = '';
+  for (const r of scriptRanges(lines)) lines.fill('', r.from + 1, r.to);
   return lines.filter(l => !isComment(l)).join('\n');
 }
 
@@ -155,22 +163,24 @@ function checkNoExpressionsInScripts(text, name) {
 function permissionLines(text) {
   const lines = text.split('\n');
   const found = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^(\s*)permissions:\s*(.*)$/.exec(lines[i]);
-    if (!m || isComment(lines[i])) continue;
-    const level = m[1].length === 0 ? 'workflow' : 'job';
-    const rest = m[2].replace(/\s+#.*$/, '').trim();
-    if (rest) { found.push({ level, scalar: rest, line: i + 1 }); continue; }
+  lines.forEach((line, i) => {
+    const m = /^(\s*)permissions:\s*(.*)/.exec(line);
+    if (!m || isComment(line)) return;
+    const top = m[1].length === 0;
+    // komentarz po wartości albo sam komentarz po `permissions:` (np. `permissions: # powód`) nie jest wartością
+    const rest = m[2].replace(/(?:^|\s)#.*/, '').trim();
+    if (rest) { found.push({ top, scalar: rest, line: i + 1 }); return; }
     for (let j = i + 1; j < lines.length; j++) {
       // Pusta linia i komentarz między uprawnieniami nie kończą bloku.
       if (lines[j].trim() === '' || isComment(lines[j])) continue;
       if (indentOf(lines[j]) <= m[1].length) break;
       const p = /^(\s+)([a-z-]+):\s*["']?(read|write|none)["']?\s*(#.*)?$/.exec(lines[j]);
-      if (!p) { found.push({ level, unsupported: lines[j].trim(), line: j + 1 }); continue; }
-      const commented = Boolean(p[4]) || isComment(lines[j - 1] || '');
-      found.push({ level, perm: p[2], value: p[3], commented, line: j + 1 });
+      if (!p) { found.push({ top, unsupported: lines[j].trim(), line: j + 1 }); continue; }
+      // lines[j - 1] istnieje zawsze (j > i >= 0)
+      const commented = Boolean(p[4]) || isComment(lines[j - 1]);
+      found.push({ top, perm: p[2], value: p[3], commented, line: j + 1 });
     }
-  }
+  });
   return found;
 }
 
@@ -181,7 +191,7 @@ function checkPermissions(text, name) {
     if (p.unsupported) bad.push(`${name}:${p.line}: nieobsługiwana linia uprawnień: ${p.unsupported}`);
     else if (p.scalar !== undefined) { if (p.scalar !== '{}') bad.push(`${name}:${p.line}: permissions: ${p.scalar} (dozwolone tylko blok albo {})`); }
     else {
-      if (p.level === 'workflow' && p.value === 'write') bad.push(`${name}:${p.line}: ${p.perm}: write na poziomie workflow`);
+      if (p.top && p.value === 'write') bad.push(`${name}:${p.line}: ${p.perm}: write na poziomie workflow`);
       if (!(p.perm === 'contents' && p.value === 'read') && !p.commented) bad.push(`${name}:${p.line}: ${p.perm}: ${p.value} bez komentarza uzasadnienia`);
     }
   }
@@ -197,10 +207,10 @@ function checkTopPermissions(text, name) {
 function checkPins(text, name) {
   const bad = [];
   text.split('\n').forEach((line, i) => {
-    const m = /^\s*(?:-\s+)?uses:\s*(\S+)(?:\s+#\s*(.*))?$/.exec(line);
+    const m = /^\s*(?:-\s+)?uses:\s*(\S+)(?:\s+#\s*(.*))?/.exec(line);
     if (!m || isComment(line) || m[1].startsWith('./')) return;
     if (!/^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/.test(m[1])) bad.push(`${name}:${i + 1}: ${m[1]} nie jest przypięte do pełnego SHA`);
-    else if (!/^v\d/.test(m[2] || '')) bad.push(`${name}:${i + 1}: ${m[1]} bez komentarza wersji`);
+    else if (!/^v\d/.test(m[2])) bad.push(`${name}:${i + 1}: ${m[1]} bez komentarza wersji`);
   });
   return bad;
 }
@@ -241,7 +251,9 @@ function checkConcurrency(text, name) {
 
 /** Klucze wyzwalaczy workflow (`on:`). */
 function triggers(text) {
-  const body = (topBlock(text, 'on') || []).filter(l => l.trim() !== '' && !isComment(l));
+  const block = topBlock(text, 'on');
+  if (!block) return [];
+  const body = block.filter(l => l.trim() !== '' && !isComment(l));
   if (!body.length) return [];
   const indent = indentOf(body[0]);
   return body.filter(l => indentOf(l) === indent).map(l => /^\s*([a-z_]+):/.exec(l)).filter(Boolean).map(m => m[1]);
@@ -279,14 +291,14 @@ function checkNoInlineZizmorIgnore(text, name) {
 function checkZizmorConfig(text) {
   const bad = checkFormats(text, 'zizmor.yml');
   const lines = text.split('\n');
-  const rules = lines.map(l => /^ {2}([a-z-]+):\s*$/.exec(l)).filter(Boolean).map(m => m[1]);
+  const rules = lines.map(l => /^ {2}([a-z-]+):/.exec(l)).filter(Boolean).map(m => m[1]);
   if (rules.join() !== 'dangerous-triggers') bad.push(`zizmor.yml: reguły z wyjątkami: [${rules.join(', ')}], oczekiwano [dangerous-triggers]`);
   const entries = [];
   lines.forEach((l, i) => {
-    const m = /^ {6}-\s+(\S+)\s*$/.exec(l);
+    const m = /^ {6}-\s+(\S+)/.exec(l);
     if (m) {
       entries.push(m[1]);
-      if (!isComment(lines[i - 1] || '')) bad.push(`zizmor.yml:${i + 1}: wpis ${m[1]} bez komentarza uzasadnienia nad nim`);
+      if (!isComment(lines[i - 1])) bad.push(`zizmor.yml:${i + 1}: wpis ${m[1]} bez komentarza uzasadnienia nad nim`);
     }
   });
   if ([...entries].sort().join() !== 'issue-audit.yml,review-gate.yml') bad.push(`zizmor.yml: lista wyjątków [${entries.join(', ')}], oczekiwano [issue-audit.yml, review-gate.yml]`);
@@ -300,15 +312,18 @@ function checkDependabot(text) {
   const entries = text.split(/^ {2}- /m).slice(1);
   if (!entries.length) bad.push('dependabot.yml: brak wpisów updates');
   for (const e of entries) {
-    const eco = (/^\s*(?:package-ecosystem:\s*|[\s\S]*?\n\s+package-ecosystem:\s*)(\S+)/.exec(e) || [])[1];
+    const em = /^\s*(?:package-ecosystem:\s*|[\s\S]*?\n\s+package-ecosystem:\s*)(\S+)/.exec(e);
+    const eco = em ? em[1] : undefined;
     const lines = e.split('\n');
     const at = lines.findIndex(l => /^ {4}cooldown:\s*$/.test(l));
-    const block = at >= 0 ? lines.slice(at + 1).filter(l => l.trim() !== '').filter((l, i, all) => all.slice(0, i + 1).every(x => indentOf(x) > 4)) : [];
-    const days = /^ {6}default-days:\s*(\d+)\s*$/.exec(block[0] || '');
+    if (at < 0) { bad.push(`dependabot.yml: ${eco}: brak cooldown.default-days`); continue; }
+    const block = lines.slice(at + 1).filter(l => l.trim() !== '').filter((l, i, all) => all.slice(0, i + 1).every(x => indentOf(x) > 4));
+    // block[0] bywa undefined (cooldown bez treści): exec rzutuje to na tekst „undefined”, który nie pasuje do wzorca
+    const days = /^ {6}default-days:\s*(\d+)\s*$/.exec(block[0]);
     if (!days) bad.push(`dependabot.yml: ${eco}: brak cooldown.default-days`);
     else if (Number(days[1]) < 7) bad.push(`dependabot.yml: ${eco}: cooldown.default-days=${days[1]} < 7`);
     if (days && block.length > 1) bad.push(`dependabot.yml: ${eco}: cooldown z dodatkowymi kluczami (${block.slice(1).map(l => l.trim()).join('; ')})`);
-    if (at >= 0 && !isComment(lines[at - 1] || '')) bad.push(`dependabot.yml: ${eco}: cooldown bez komentarza nad wpisem`);
+    if (!isComment(lines[at - 1])) bad.push(`dependabot.yml: ${eco}: cooldown bez komentarza nad wpisem`);
   }
   return bad;
 }
@@ -604,5 +619,225 @@ describe('kontrole ujemne: fixture łamiący regułę daje zarzut', () => {
     assert.deepEqual(triggers('name: X\n\non:\n  issues:\n    types: [opened]\n  issue_comment:\n    types: [created]\n\npermissions:\n  contents: read\n'), ['issues', 'issue_comment']);
     assert.deepEqual(triggers('name: X\n'), []);
     assert.equal(checkFormats('on:\n  "workflow_run":\n    types: [completed]\n', 'f').length, 1);
+  });
+});
+
+describe('dokładne wyniki kontroli: komunikaty, numery linii, granice wcięć i kotwice wyrażeń (pomiar Stryker)', () => {
+  const SHA = 'a'.repeat(40);
+  const wf = body => `name: X\n\non:\n  push:\n\npermissions:\n  contents: read\n\n${body}`;
+  const stepsOf = body => wf(`jobs:\n  a:\n    name: a\n    steps:\n${body}`);
+
+  test('odczyt pliku, lista plików YAML i stałe', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wh-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'x.yml'), 'a\r\nb\r\n');
+      assert.equal(readIn(dir, 'x.yml'), 'a\nb\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    assert.deepEqual(workflowFiles(['b.yml', 'a.yaml', 'x.yml.bak', 'y.txt', 'c.yml']), ['a.yaml', 'b.yml', 'c.yml']);
+    assert.deepEqual(WYMAGANE_NAZWY, ['validate', 'secret-scan', 'quality-gate', 'pr-title', 'review-ack']);
+  });
+
+  test('topBlock, jobs: granice bloku, linia złożona z samych spacji, tekst joba', () => {
+    assert.deepEqual(topBlock('a:\n  x\nname: X\nb:\n', 'a'), ['  x']);
+    assert.deepEqual(jobs('jobs:\n      \n  a:\n    name: a\n').map(j => j.id), ['a']);
+    assert.equal(jobs('jobs:\n  a:\n    name: a\n')[0].text, '  a:\n    name: a\n');
+  });
+
+  test('steps: kotwice klucza steps, komentarz po kluczu, linie puste i komentarze, krok niezależny od cudzych wcięć', () => {
+    assert.equal(steps('    # steps:\n    steps:\n      - name: a\n').length, 1);
+    assert.deepEqual(steps('    steps: &x\n      - name: a\n'), []);
+    assert.equal(steps('    steps:  # komentarz\n      - name: a\n').length, 1);
+    assert.deepEqual(steps('    name: x\n    - a\n'), []);
+    assert.equal(steps('    steps:\n   \n      - name: a\n').length, 1);
+    assert.equal(steps('    steps:\n      - name: a\n  \n      - name: b\n').length, 2);
+    assert.equal(steps('    steps:\n      - name: a\n        # c\n        run: x\n')[0].includes('# c'), true);
+    assert.deepEqual(steps('    steps:\n      foo: 1\n'), []);
+    const odd = steps('    steps:\n      - name: a\n    - other\n');
+    assert.equal(odd.length, 1);
+    assert.doesNotMatch(odd[0], /other/);
+    assert.equal(steps('    steps:\n      - name: a\n      weird: 1\n').length, 1);
+  });
+
+  test('blockOf: klucz w pierwszej linii, klucz z myślnikiem, linia ze samych spacji w bloku', () => {
+    assert.deepEqual(blockOf('with:\n  a: 1\n', 'with'), ['  a: 1', '']);
+    assert.deepEqual(blockOf('      - env:\n          A: 1\n        run: x\n', 'env'), ['          A: 1']);
+    assert.deepEqual(blockOf('      - uses: x\n        with:\n          a: 1\n  \n          b: 2\n        env:\n', 'with').map(l => l.trim()).filter(Boolean), ['a: 1', 'b: 2']);
+  });
+
+  test('skrypty run/script: kotwice, myślnik przy kluczu, linie ze samych spacji, komunikaty', () => {
+    assert.deepEqual(checkNoExpressionsInScripts('      - name: rerun: ${{ github.sha }}\n', 'f'), []);
+    assert.deepEqual(checkNoExpressionsInScripts('      - run: echo x\n        env:\n          T: ${{ github.sha }}\n', 'f'), []);
+    assert.equal(checkNoExpressionsInScripts('      - name: s\n        run: |\n          echo a\n  \n          echo ${{ github.sha }}\n', 'f').length, 1);
+    assert.equal(checkNoExpressionsInScripts('        run:\n          echo ${{ github.sha }}\n', 'f').length, 1);
+    assert.equal(checkNoExpressionsInScripts('        run:${{ github.sha }}\n', 'f').length, 1);
+    assert.deepEqual(checkNoExpressionsInScripts('      - run: |\n          echo "${{ github.sha }}"\n', 'f'), ['f: wyrażenie ${{ }} w skrypcie run/script: |']);
+    assert.deepEqual(checkNoExpressionsInScripts('        run:\n          echo ${{ github.sha }}\n', 'f'), ['f: wyrażenie ${{ }} w skrypcie run/script: echo ${{ github.sha }}']);
+    const inline = `echo ${'x'.repeat(80)} \${{ github.sha }}`;
+    assert.deepEqual(checkNoExpressionsInScripts(`      - run: ${inline}\n`, 'f'), [`f: wyrażenie \${{ }} w skrypcie run/script: ${inline.slice(0, 60)}`]);
+    assert.deepEqual(checkNoExpressionsInScripts('      - name: bashshell: ${{ github.sha }}\n', 'f'), []);
+    const shell = `shell: bash ${'x'.repeat(70)} \${{ github.sha }}`;
+    assert.deepEqual(checkNoExpressionsInScripts(`        ${shell}\n`, 'f'), [`f: wyrażenie \${{ }} w shell: ${shell.slice(0, 60)}`]);
+  });
+
+  test('yamlOnly: skrypt zastąpiony pustymi liniami, komentarze usunięte', () => {
+    assert.equal(yamlOnly('a:\n  run:\n    echo x\n# c\n'), 'a:\n  run:\n\n');
+    // `:\s+` obejmuje puste linie po wyczyszczonym skrypcie: mapa flow w następnej linii jest widoczna
+    assert.equal(checkFormats('a:\n  run:\n    echo x\n{ b: 1 }\n', 'f').length, 1);
+    // komentarz z zapisem nieobsługiwanym nie jest zarzutem
+    assert.deepEqual(checkFormats('a: 1\n# - { b }\n# "k": 1\n# <<: *x\n', 'f'), []);
+  });
+
+  test('checkFormats: dokładne komunikaty i granice rozpoznania', () => {
+    assert.deepEqual(checkFormats('jobs:\n\ta: 1\n', 'f'), ['f: tabulator w YAML']);
+    assert.deepEqual(checkFormats('x:\n  - { a: 1 }\n', 'f'), ['f: mapa w stylu flow ({ ... }) nieobsługiwana przez test']);
+    assert.deepEqual(checkFormats('x:\n  "uses": x\n', 'f'), ['f: klucz w cudzysłowie nieobsługiwany przez test']);
+    assert.deepEqual(checkFormats('  env: &e\n', 'f'), ['f: kotwica, alias albo merge key nieobsługiwane przez test']);
+    assert.deepEqual(checkFormats('x: "\\u0024{{"\n', 'f'), ['f: znak $ zapisany sekwencją ucieczki YAML (ukryte wyrażenie)']);
+    assert.deepEqual(checkFormats('on: push\n', 'f'), ['f: wyzwalacze w formie skróconej (on: ...) nieobsługiwane przez test']);
+    // zapis w środku tekstu nie jest składnią YAML
+    assert.deepEqual(checkFormats('name: x - { y }\n', 'f'), []);
+    assert.deepEqual(checkFormats('name: say "hi": there\n', 'f'), []);
+    assert.deepEqual(checkFormats('name: a&b\n', 'f'), []);
+    assert.deepEqual(checkFormats('cat&dog\n', 'f'), []);
+    assert.deepEqual(checkFormats('a<<: b\n', 'f'), []);
+    // wielokrotne odstępy też są składnią
+    assert.equal(checkFormats('x:\n  -  { a: 1 }\n', 'f').length, 1);
+    assert.equal(checkFormats('key:  { a: 1 }\n', 'f').length, 1);
+    assert.equal(checkFormats('x:\n  -  "uses": x\n', 'f').length, 1);
+    assert.equal(checkFormats('x:\n  "uses" : x\n', 'f').length, 1);
+    assert.equal(checkFormats('*alias\n', 'f').length, 1);
+    assert.equal(checkFormats('k:  &a\n', 'f').length, 1);
+    assert.equal(checkFormats('x:\n  -  *a\n', 'f').length, 1);
+    assert.equal(checkFormats('x:\n  - *a\n', 'f').length, 1);
+    assert.equal(checkFormats('<<: x\n', 'f').length, 1);
+    assert.equal(checkFormats('<<  : x\n', 'f').length, 1);
+    assert.equal(checkFormats('<< : x\n', 'f').length, 1);
+    assert.equal(checkFormats('on:  push\n', 'f').length, 1);
+  });
+
+  test('uprawnienia: komunikaty z numerem linii, komentarz po permissions, cudzysłowy, odstępy, linia ze samych spacji', () => {
+    assert.deepEqual(checkPermissions('permissions:\n  issues: write extra\n', 'f'), ['f:2: nieobsługiwana linia uprawnień: issues: write extra']);
+    assert.deepEqual(checkPermissions('permissions:\n  foo bar: read\n', 'f'), ['f:2: nieobsługiwana linia uprawnień: foo bar: read']);
+    assert.deepEqual(checkPermissions('name: X\n\npermissions: write-all\n', 'f'), ['f:3: permissions: write-all (dozwolone tylko blok albo {})']);
+    assert.deepEqual(checkPermissions('permissions: write-all # powód\n', 'f'), ['f:1: permissions: write-all (dozwolone tylko blok albo {})']);
+    assert.deepEqual(checkPermissions('permissions: write-all # powód\r\n', 'f'), ['f:1: permissions: write-all (dozwolone tylko blok albo {})']);
+    assert.deepEqual(checkPermissions('permissions: # powód\n  contents: read\n', 'f'), []);
+    assert.deepEqual(checkPermissions('      - name: set permissions: write\n', 'f'), []);
+    assert.deepEqual(checkPermissions('permissions:\n  contents:  read\n', 'f'), []);
+    assert.deepEqual(checkPermissions('permissions:\n  contents: "read"\n', 'f'), []);
+    assert.deepEqual(checkPermissions('permissions:\n  contents: \'read\'\n', 'f'), []);
+    assert.deepEqual(checkPermissions('jobs:\n  a:\n    permissions:\n      contents: write\n', 'f'), ['f:4: contents: write bez komentarza uzasadnienia']);
+    assert.deepEqual(checkPermissions('jobs:\n  a:\n    permissions:\n      contents: read\n  \n      actions: write\n', 'f'), ['f:6: actions: write bez komentarza uzasadnienia']);
+    assert.deepEqual(checkTopPermissions('name: X\n', 'f'), ['f: brak permissions na poziomie workflow']);
+  });
+
+  test('akcje: kotwice i odstępy w wierszu uses, komunikaty z numerem linii', () => {
+    assert.deepEqual(checkPins('a: 1\nb: 2\n      - uses: actions/checkout@v7\n', 'f'), ['f:3: actions/checkout@v7 nie jest przypięte do pełnego SHA']);
+    assert.deepEqual(checkPins(`a: 1\n      - uses: x/y@${SHA}\n`, 'f'), [`f:2: x/y@${SHA} bez komentarza wersji`]);
+    assert.deepEqual(checkPins(`      - uses: x/y@${SHA} # pin v7\n`, 'f'), [`f:1: x/y@${SHA} bez komentarza wersji`]);
+    assert.equal(checkPins('        uses: actions/checkout@v7\n', 'f').length, 1);
+    assert.equal(checkPins('      -  uses: a/b@main\n', 'f').length, 1);
+    assert.equal(checkPins('      - uses:actions/checkout@v7\n', 'f').length, 1);
+    assert.equal(checkPins(`      - uses: x/y@${SHA}a # v7\n`, 'f').length, 1);
+    assert.equal(checkPins(`      - uses: !x/a@${SHA} # v7\n`, 'f').length, 1);
+    assert.equal(checkPins(`      - uses: x/y@${SHA} # v7 extra\n`, 'f').length, 0);
+    assert.equal(checkPins('      - uses: a/b@main extra\n', 'f').length, 1);
+    assert.deepEqual(checkPins(`      - uses: x/y@${SHA}  # v7\n`, 'f'), []);
+    assert.deepEqual(checkPins(`      - uses: x/y@${SHA} #v7\n`, 'f'), []);
+    assert.deepEqual(checkPins('      - name: reuses: x/y@main\n', 'f'), []);
+  });
+
+  test('checkout: komunikaty, kotwice wyrażeń, odstępy w persist-credentials', () => {
+    const co = body => stepsOf(`      - uses: actions/checkout@${SHA} # v7\n${body}`);
+    assert.deepEqual(checkCheckoutCredentials(co(''), 'f'), ['f: job a: checkout bez persist-credentials: false w with']);
+    assert.deepEqual(checkCheckoutCredentials(wf(`uses: actions/checkout@${SHA} # v7\n`), 'f'), ['f: checkout w pliku bez rozpoznanych jobów']);
+    assert.deepEqual(checkCheckoutCredentials(stepsOf('      - run: echo "uses: actions/checkout@v7"\n'), 'f'), []);
+    assert.equal(checkCheckoutCredentials(stepsOf(`      - uses:actions/checkout@${SHA} # v7\n`), 'f').length, 1);
+    const ok = v => checkCheckoutCredentials(co(`        with:\n          persist-credentials: ${v}\n`), 'f');
+    assert.deepEqual(ok('false # powód'), []);
+    assert.deepEqual(ok('false   '), []);
+    assert.deepEqual(ok(' false'), []);
+    assert.equal(ok('falsey').length, 1);
+    assert.equal(checkCheckoutCredentials(co('        with:\n          not-persist-credentials: false\n'), 'f').length, 1);
+  });
+
+  test('nazwy jobów, concurrency, wyzwalacze: komunikaty i granice', () => {
+    assert.deepEqual(checkJobNames(wf('jobs:\n  a:\n    runs-on: x\n'), 'f'), ['f: job a bez name']);
+    assert.deepEqual(checkConcurrency(wf('jobs:\n  a:\n    name: a\n'), 'f'), ['f: brak concurrency']);
+    assert.deepEqual(triggers('on:\n   \n  push:\n  issues:\n'), ['push', 'issues']);
+    assert.deepEqual(triggers('on:\n  push:\n  FOO: 1\n'), ['push']);
+    assert.deepEqual(triggers('on:\n  push:\n  x-y: 1\n'), ['push']);
+  });
+
+  test('checkNoPrCode: dokładne komunikaty, odstępy w wzorcach, kotwice kroku checkout', () => {
+    const run = r => checkNoPrCode(`      - run: ${r}\n`, 'g.yml');
+    assert.deepEqual(run('echo ${{ github.head_ref }}'), ['g.yml: odwołanie do github.head_ref']);
+    assert.deepEqual(run('echo ${{ github.event.pull_request.merge_commit_sha }}'), ['g.yml: odwołanie do merge_commit_sha']);
+    assert.deepEqual(run('echo ${{ github.event.pull_request[ \'head\'].sha }}'), ['g.yml: odwołanie do github.event.pull_request.head']);
+    assert.deepEqual(run('gh pr checkout "$PR"'), ['g.yml: gh pr checkout']);
+    assert.deepEqual(run('gh  pr checkout "$PR"'), ['g.yml: gh pr checkout']);
+    assert.deepEqual(run('gh pr  checkout "$PR"'), ['g.yml: gh pr checkout']);
+    assert.deepEqual(run('git fetch origin x'), ['g.yml: polecenie git pobierające albo przełączające kod']);
+    assert.deepEqual(run('git  fetch origin x'), ['g.yml: polecenie git pobierające albo przełączające kod']);
+    assert.deepEqual(checkNoPrCode(`      - uses: actions/download-artifact@${SHA} # v5\n`, 'g.yml'), ['g.yml: download-artifact (artefakty PR są niezaufane)']);
+    const co = (uses, extra) => stepsOf(`      - name: c\n        ${uses}\n${extra}`);
+    assert.deepEqual(checkNoPrCode(co(`uses: actions/checkout@${SHA} # v7`, '        with:\n          ref: main\n'), 'g.yml'), ['g.yml: job a: checkout z ref/repository']);
+    assert.deepEqual(checkNoPrCode(stepsOf(`      - uses:actions/checkout@${SHA} # v7\n        with:\n          ref: main\n`), 'g.yml'), ['g.yml: job a: checkout z ref/repository']);
+    assert.deepEqual(checkNoPrCode(stepsOf('      - name: t\n        run: echo uses: actions/checkout@x\n        with:\n          ref: x\n'), 'g.yml'), []);
+    assert.deepEqual(checkNoPrCode(co(`uses: actions/checkout@${SHA} # v7`, '        with:\n          xref: abc\n'), 'g.yml'), []);
+  });
+
+  test('zizmor: komunikaty, odstępy, kolejność wpisów, wpisy zagnieżdżone, disable w komentarzu', () => {
+    assert.deepEqual(checkNoInlineZizmorIgnore('      - uses: x # zizmor: ignore[unpinned-uses]\n', 'f'), ['f: komentarz zizmor: ignore poza .github/zizmor.yml']);
+    assert.equal(checkNoInlineZizmorIgnore('      - uses: x # zizmor:  ignore[unpinned-uses]\n', 'f').length, 1);
+    const ok = 'rules:\n  dangerous-triggers:\n    ignore:\n      # powód 1\n      - issue-audit.yml\n      # powód 2\n      - review-gate.yml\n';
+    assert.ok(checkZizmorConfig(ok + '\t\n').includes('zizmor.yml: tabulator w YAML'));
+    assert.deepEqual(checkZizmorConfig(ok.replace('  dangerous-triggers:', '  dangerous-triggers: ')), []);
+    assert.equal(checkZizmorConfig(ok + '  other-rule: x\n').length, 1);
+    assert.deepEqual(checkZizmorConfig(ok.replace('      - review-gate.yml\n', '      - review-gate.yml\n        - nested.yml\n')), []);
+    assert.deepEqual(checkZizmorConfig(ok.replace('      - issue-audit.yml', '      -  issue-audit.yml')), []);
+    assert.deepEqual(checkZizmorConfig('rules:\n  dangerous-triggers:\n    ignore:\n      # powód 2\n      - review-gate.yml\n      # powód 1\n      - issue-audit.yml\n'), []);
+    assert.deepEqual(checkZizmorConfig(ok.replace('    ignore:', '    ignore:  # disable: tymczasowo')), []);
+    assert.deepEqual(checkZizmorConfig(ok.replace('      # powód 2\n', '')), ['zizmor.yml:6: wpis review-gate.yml bez komentarza uzasadnienia nad nim']);
+  });
+
+  test('dependabot: komunikaty, granice wpisów, odstępy, wcięcia cooldown, puste linie, wpis zaczynający się od cooldown', () => {
+    const entry = cool => `version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n${cool}    schedule:\n      interval: weekly\n`;
+    const good = '    # powód\n    cooldown:\n      default-days: 7\n';
+    assert.deepEqual(checkDependabot('version: 2\n'), ['dependabot.yml: brak wpisów updates']);
+    assert.deepEqual(checkDependabot(entry(good).replace('interval: weekly', 'interval: weekly  - x')), []);
+    assert.deepEqual(checkDependabot('version: 2\nupdates:\n  - directory: / # package-ecosystem: y\n    schedule:\n      interval: weekly\n'), ['dependabot.yml: undefined: brak cooldown.default-days']);
+    const low = '    # powód\n    cooldown:\n      default-days: 3\n';
+    assert.deepEqual(checkDependabot(entry(low).replace('package-ecosystem: npm', 'package-ecosystem:  npm')), ['dependabot.yml: npm: cooldown.default-days=3 < 7']);
+    assert.deepEqual(checkDependabot(`version: 2\nupdates:\n  - directory: /\n    package-ecosystem:  npm\n${low}`), ['dependabot.yml: npm: cooldown.default-days=3 < 7']);
+    // cooldown w złym miejscu (za głęboko) albo z wartością w tej samej linii nie jest cooldownem wpisu
+    assert.deepEqual(checkDependabot(entry('    schedule2:\n        cooldown:\n          default-days: 9\n')), ['dependabot.yml: npm: brak cooldown.default-days']);
+    assert.deepEqual(checkDependabot(entry('    cooldown: x\n')), ['dependabot.yml: npm: brak cooldown.default-days']);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown: \n      default-days: 7\n')), []);
+    // default-days: wcięcie, wartość, odstępy
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n        default-days: 9\n')), ['dependabot.yml: npm: brak cooldown.default-days']);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n      default-days: 9 dni\n')), ['dependabot.yml: npm: brak cooldown.default-days']);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n      default-days:  9\n')), []);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n      default-days: 10\n')), []);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n      default-days: 9 \n')), []);
+    // puste linie (także ze spacjami) w bloku nie przerywają go
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n\n      default-days: 7\n')), []);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n   \n      default-days: 7\n')), []);
+    assert.deepEqual(checkDependabot(entry('    # powód\n    cooldown:\n      default-days: 7\n      a: 1\n      b: 2\n')), ['dependabot.yml: npm: cooldown z dodatkowymi kluczami (a: 1; b: 2)']);
+    // wpis zaczynający się od cooldown: brak linii nad nim, więc brak komentarza
+    assert.deepEqual(checkDependabot('version: 2\nupdates:\n  -     cooldown:\n      default-days: 7\n    package-ecosystem: npm\n'), ['dependabot.yml: npm: cooldown bez komentarza nad wpisem']);
+    // bez cooldown nie ma bloku, nawet gdy pierwsze linie wpisu wyglądają jak jego treść
+    assert.deepEqual(checkDependabot('updates:\n  - \n      default-days: 9\n    package-ecosystem: npm\n'), ['dependabot.yml: npm: brak cooldown.default-days']);
+  });
+
+  test('uzupełnienia po pomiarze: wartość bez spacji po dwukropku, spacje na końcu, wpis w pierwszej linii, wpis z dodatkowymi spacjami', () => {
+    assert.deepEqual(checkPermissions('permissions:write-all\n', 'f'), ['f:1: permissions: write-all (dozwolone tylko blok albo {})']);
+    assert.deepEqual(checkPermissions('permissions: write-all  \n', 'f'), ['f:1: permissions: write-all (dozwolone tylko blok albo {})']);
+    assert.deepEqual(checkZizmorConfig('      - a.yml\n').filter(x => /wpis/.test(x)), ['zizmor.yml:1: wpis a.yml bez komentarza uzasadnienia nad nim']);
+    assert.ok(checkDependabot('\tx\n').includes('dependabot.yml: tabulator w YAML'));
+    assert.deepEqual(checkDependabot('version: 2\nupdates:\n  -     package-ecosystem: npm\n    # powód\n    cooldown:\n      default-days: 3\n'), ['dependabot.yml: npm: cooldown.default-days=3 < 7']);
+    assert.deepEqual(triggers('name: X\n\non:\n\npermissions:\n  contents: read\n'), []);
   });
 });
