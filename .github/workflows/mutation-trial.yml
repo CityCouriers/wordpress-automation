@@ -1,0 +1,173 @@
+name: Mutation trial
+
+# Próba testów mutacyjnych plików src/*.gs na Linuksie (#253). WYŁĄCZNIE ręczna (workflow_dispatch):
+# utworzenie tego pliku niczego nie uruchamia, a pierwsze uruchomienie wymaga jawnej zgody właściciela
+# zapisanej w komentarzu zgłoszenia #253. Nie jest wymaganą kontrolą PR (to #254) i niczego nie blokuje.
+#
+# Mutanty wykonują zmutowany kod, więc cały przebieg idzie w kontenerze, który WYMUSZA izolację (kontrakt
+# #234/#253): bez sieci (--network none), system plików tylko do odczytu, zapis tylko w skopiowanym
+# katalogu przebiegu (/work) i w /tmp, nieuprzywilejowany UID, zero uprawnień, bez sekretów i bez
+# poświadczeń w otoczeniu. Wewnątrz kontenera scripts/mutation/trial.js najpierw sprawdza te fakty
+# w /proc, potem wykonuje sondy (sieć, zapis i odczyt poza katalogiem, pozytywny test) i dopiero wtedy
+# startuje mutanty; nieudana weryfikacja kończy przebieg bez raportu. Ten workflow nie używa sekretów,
+# środowisk wdrożeniowych ani pull_request_target; zob. docs/quality/mutation.md i test/mutation-workflow.test.js.
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "Plik źródłowy z src/ do pomiaru, np. Payloads.gs"
+        required: true
+        default: Payloads.gs
+        type: string
+      suite:
+        description: "Zestaw testów: per-mutant (dobór z mapy pokrycia), file (testy pliku z .quality/mutation-tests.json), full (wszystkie)"
+        required: true
+        default: per-mutant
+        type: choice
+        options:
+          - per-mutant
+          - file
+          - full
+      concurrency:
+        description: "Liczba równoległych procesów Strykera"
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "2"
+          - "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-trial
+  cancel-in-progress: false
+
+jobs:
+  mutation-trial:
+    name: mutation-trial
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      # Obraz po skrócie (digest), nie po ruchomym tagu. Zawiera Node 22 i git (testy repozytorium tworzą repozytoria tymczasowe).
+      NODE_IMAGE: node:22-bookworm@sha256:e13726ca604184d7a91fcacab1fc09eefd642dc28e79ac34e85540dd93b78cfb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Pełna historia jak w CI: część testów repozytorium czyta git. Bez zapisanych poświadczeń w .git/config.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+
+      # Wejścia przekazujemy przez zmienne środowiskowe, nigdy przez interpolację w skrypcie.
+      - name: Validate inputs
+        env:
+          TRIAL_FILE: ${{ inputs.file }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TRIAL_FILE" | grep -Eq '^[A-Za-z0-9]+\.gs$'; then
+            echo "::error::Nieprawidłowa nazwa pliku (oczekiwano np. Payloads.gs)"
+            exit 1
+          fi
+          test -f "src/$TRIAL_FILE"
+          # Konfiguracja npm w repozytorium mogłaby podmienić źródło pakietów przed instalacją zależności.
+          if [ -e .npmrc ]; then
+            echo "::error::W repozytorium jest .npmrc: przebieg odmawia (instalacja zależności musiałaby ufać jego treści)"
+            exit 1
+          fi
+
+      # Skrypty instalacyjne zależności są wyłączone: Stryker ich nie wymaga, a nic nie ma się wykonywać poza kontenerem.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Katalog przebiegu: kopia całego repozytorium (testy czytają README, docs i .github, a Stryker wybiera
+      # pliki przez git). Nie ma w nim poświadczeń: persist-credentials: false, a środowisko kontenera jest puste.
+      - name: Prepare run directory
+        run: |
+          set -euo pipefail
+          RUN_DIR="$RUNNER_TEMP/mutation-run"
+          OUTSIDE_DIR="$RUNNER_TEMP/mutation-outside"
+          # Pozostałości po wcześniejszym przebiegu (pliki UID 1000 z kontenera) usuwa root.
+          sudo rm -rf "$RUN_DIR" "$OUTSIDE_DIR" "$RUNNER_TEMP/mutation-reports"
+          mkdir -p "$RUN_DIR" "$OUTSIDE_DIR"
+          cp -a "$GITHUB_WORKSPACE/." "$RUN_DIR/"
+          # Raport i pliki robocze Strykera pochodzą wyłącznie z tego przebiegu, nigdy z kopii repozytorium.
+          rm -rf "$RUN_DIR/reports" "$RUN_DIR/.stryker-tmp" "$RUN_DIR/.stryker-shadow"
+          # Plik kontrolny poza katalogiem przebiegu: sonda odczytu musi go NIE widzieć w kontenerze.
+          printf 'poza-katalogiem-przebiegu-%s\n' "$RANDOM$RANDOM" > "$OUTSIDE_DIR/kontrolny.txt"
+          sudo chown -R 1000:1000 "$RUN_DIR"
+
+      - name: Pull Node image
+        run: docker pull "$NODE_IMAGE"
+
+      # Jedyny montowany katalog to katalog przebiegu. Bez -e poza TZ, bez --env-file, bez gniazda dockera.
+      - name: Run mutation trial in isolated container
+        env:
+          TRIAL_FILE: ${{ inputs.file }}
+          TRIAL_SUITE: ${{ inputs.suite }}
+          TRIAL_CONCURRENCY: ${{ inputs.concurrency }}
+        run: |
+          set -euo pipefail
+          docker run --rm --pull never \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --user 1000:1000 \
+            --pids-limit 4096 \
+            --memory 12g \
+            --memory-swap 12g \
+            --cpus 4 \
+            --tmpfs /tmp:rw,nosuid,size=2g \
+            --mount type=bind,source="$RUNNER_TEMP/mutation-run",target=/work \
+            --workdir /work \
+            --env TZ=UTC \
+            --entrypoint node \
+            "$NODE_IMAGE" \
+            scripts/mutation/trial.js "$TRIAL_FILE" "--suite=$TRIAL_SUITE" "--concurrency=$TRIAL_CONCURRENCY" \
+            "--outside=$RUNNER_TEMP/mutation-outside/kontrolny.txt,$GITHUB_WORKSPACE/package.json"
+
+      # Katalog przebiegu jest po kontenerze nieufny: zmutowany kod mógł w nim zostawić dowolne pliki i dowiązania.
+      # Do raportu trafiają tylko zwykłe pliki .json i .md z katalogu raportów (find -type f nie idzie za dowiązaniami),
+      # ograniczone rozmiarem i kopiowane poza katalog przebiegu. Podsumowanie i wysyłka czytają wyłącznie z kopii.
+      - name: Collect reports
+        if: always()
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/mutation-run/reports/mutation"
+          DEST="$RUNNER_TEMP/mutation-reports"
+          mkdir -p "$DEST"
+          if [ -n "$(sudo find "$SRC" -maxdepth 0 -type d 2>/dev/null)" ]; then
+            sudo find "$SRC" -maxdepth 1 -type f \( -name '*.json' -o -name '*.md' \) -size -20M -print0 |
+              while IFS= read -r -d '' file; do
+                sudo cat -- "$file" > "$DEST/$(basename -- "$file")"
+              done
+          fi
+
+      - name: Step summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/mutation-reports/summary.md" ]; then
+            head -c 900000 "$RUNNER_TEMP/mutation-reports/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Raporty powstają dopiero po pozytywnej weryfikacji izolacji; przy odmowie nie ma czego wysyłać.
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: mutation-reports
+          path: ${{ runner.temp }}/mutation-reports
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up run directory
+        if: always()
+        run: sudo rm -rf "$RUNNER_TEMP/mutation-run" "$RUNNER_TEMP/mutation-outside"
