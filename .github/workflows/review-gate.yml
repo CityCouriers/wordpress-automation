@@ -44,8 +44,8 @@ on:
 
 permissions:
   contents: read
-  issues: read
-  pull-requests: read
+  issues: read # odczyt komentarzy PR-a (komentarz /reviewed)
+  pull-requests: read # odczyt recenzji, próśb o recenzję i wątków PR-a
 
 # Do not cancel: a cancelled run leaves a cancelled check suite on the head.
 concurrency:
@@ -54,6 +54,7 @@ concurrency:
 
 jobs:
   review-ack:
+    name: review-ack
     if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -64,14 +65,15 @@ jobs:
       # pull_request_target checks out the BASE branch by default, so this is
       # main's script, never code from the PR.
       - name: Checkout gate script (base branch)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           sparse-checkout: |
             scripts/quality/review-ack.js
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -82,6 +84,7 @@ jobs:
         run: node scripts/quality/review-ack.js --pr "$PR"
 
   reevaluate:
+    name: reevaluate
     # Comments re-run the evaluation only when they come from people who can
     # acknowledge (owner/members/collaborators), the Claude app, or the review
     # bots (a new bot comment must invalidate an earlier acknowledgment).
@@ -94,8 +97,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      actions: write
-      pull-requests: read
+      actions: write # ponowne uruchomienie przebiegu review-ack (POST .../rerun)
+      pull-requests: read # odczyt head PR-a, żeby ponowić przebieg dokładnie dla tego commitu
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
