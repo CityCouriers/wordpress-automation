@@ -13,6 +13,13 @@
  * zapis przepuszczony po cichu byłby obejściem reguł. Wzorce wierszy `uses:`, `permissions:`, `run:`/`script:` i wpisów
  * `zizmor.yml` są celowo bez `$` na końcu: dopisek za wartością ma dawać zarzut, a nie sprawiać, że wiersz jest pomijany.
  *
+ * Granica testu: parser jest tekstowy i nie rozpozna każdej pisowni YAML (spacja przed dwukropkiem, tagi, flow w `[...]`,
+ * wieloliniowe skalary w cudzysłowie, aliasy o nietypowych nazwach i inne klasy opisane w #332). To świadome: AC-1 zgłoszenia
+ * #296 wymaga wąskiego testu zachowania (job `review-ack` bez `ref:` i bez `head` PR, zamknięta lista wyjątków zizmor, kontrola
+ * ujemna), AC-2 ogranicza testy do pomyłki i regresji w zatwierdzonym kodzie, a celowy zapis w nietypowej pisowni leży
+ * w zakresie decyzji właściciela (wariant A). Bramką rozumiejącą YAML w każdej pisowni są narzędzia z PR-3 (zizmor, pinact,
+ * yamllint); po PR-3 #332 sprawdza wykonaniem, które klasy pokrywają.
+ *
  * Zakres plików: wszystkie workflow'y poza `apps-script-drift.yml` i `deploy-apps-script.yml`; te dwa
  * (workflow'y z sekretami Apps Script) obejmuje PR-2 zgłoszenia #296 i do tego czasu są na liście
  * ODROCZONE. Ten test nie dowodzi zachowania w runtime ani izolacji sekretów od gałęzi.
