@@ -327,7 +327,7 @@ for (const [host] of NETWORK_TARGETS) {
     const { io } = fakeIo({ connectSucceeds: async h => h === host });
     const failures = await runProbes({ io });
     assert.equal(failures.length, 1);
-    assert.match(failures[0], new RegExp(`połączenie z ${host.replace(/[.:]/g, '\\$&')}`));
+    assert.ok(failures[0].includes(`połączenie z ${host}`), failures[0]);
   });
 }
 

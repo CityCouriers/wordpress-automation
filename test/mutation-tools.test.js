@@ -150,7 +150,7 @@ test('run-tests: bez argumentów uruchamia wszystkie testy poza skanującymi rep
   const tree = makeTree({ 'test/a.test.js': PASS, 'test/b.test.js': PASS, 'test/repo-identity.test.js': FAIL, 'test/source-control-chars.test.js': FAIL, 'test/helper.js': FAIL });
   const r = tool(tree, 'run-tests.js');
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /ℹ tests 2\b/);
+  assert.match(r.stdout, /[ℹ#] tests 2\b/);
 });
 
 test('run-tests: czerwony test daje kod niezerowy; podane pliki zawężają przebieg', () => {
@@ -158,7 +158,7 @@ test('run-tests: czerwony test daje kod niezerowy; podane pliki zawężają prze
   assert.notEqual(tool(tree, 'run-tests.js').status, 0);
   const only = tool(tree, 'run-tests.js', ['test/a.test.js']);
   assert.equal(only.status, 0, only.stdout);
-  assert.match(only.stdout, /ℹ tests 1\b/);
+  assert.match(only.stdout, /[ℹ#] tests 1\b/);
 });
 
 test('run-tests: testy dostają tylko allowlistę środowiska (bez poświadczeń i GIT_*)', () => {
