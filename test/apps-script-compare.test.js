@@ -323,13 +323,13 @@ describe('apps-script-compare: kontrola zerowa', () => {
     assert.match(r.stdout, / M Kod\.gs/);
   });
 
-  test('nazwa pliku z wiodącą spacją nie jest normalizowana przez przycięcie nazwy', { skip: process.platform === 'win32' }, () => {
+  test('plik z wiodącą spacją w nazwie, różniący się samą końcową nową linią, nie jest driftem (nazwa nie jest przycinana)', { skip: process.platform === 'win32' }, () => {
     const { root, fake } = repo("fs.writeFileSync(' Spacja.gs', 'x\\n');");
     fs.writeFileSync(path.join(root, ' Spacja.gs'), 'x');
     git(root, ['add', '-A']);
     git(root, ['commit', '-q', '-m', 'spacja']);
     const r = raw(root, fake, ['--cwd', root]);
-    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
   });
 
   test('eksporty modułu: compare i normalizacje, a samo wczytanie modułu niczego nie uruchamia', () => {
@@ -489,16 +489,24 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.equal(fs.readFileSync(out, 'utf8'), 'char');
   });
 
-  // Charakteryzacja znanego ograniczenia: nazwa z ls-files jest przycinana, więc plik z wiodącym białym znakiem nie jest normalizowany
-  // i różnica samej końcowej nowej linii zostaje zgłoszona jako drift. Test zapisuje to zachowanie; naprawa (#317, git ls-files -z) odwróci asercję.
-  test('znane ograniczenie: śledzony plik z wiodącą spacją albo NBSP w nazwie nie jest normalizowany (nazwa z ls-files jest przycinana)', () => {
-    const { root } = mini({ ' Sp.gs': 'x', [`${NBSP}Nb.gs`]: 'x', 'Kod.gs': 'function a() {}\n' });
-    git(root, ['config', 'core.quotePath', 'false']);
-    fs.writeFileSync(path.join(root, ' Sp.gs'), 'x\n');
-    fs.writeFileSync(path.join(root, `${NBSP}Nb.gs`), 'x\n');
-    const { changes } = compare(root);
-    assert.match(changes, /Sp\.gs/);
-    assert.match(changes, /Nb\.gs/);
+  // #317: nazwy plików czytamy z wyjścia gita rozdzielanego NUL-em (`ls-files -z`) i nie przycinamy ich, więc plik z wiodącym białym znakiem
+  // w nazwie jest normalizowany jak każdy inny, a różnica samej końcowej nowej linii nie jest driftem. Domyślna konfiguracja gita
+  // (core.quotePath = true), czyli bez obejścia cytowania, które ukrywało błąd dla NBSP.
+  for (const [opis, name] of [['wiodącą spacją', ' Sp.gs'], ['wiodącym NBSP', `${NBSP}Nb.gs`], ['spacją w środku', 'a b.gs']]) {
+    test(`śledzony plik z ${opis} w nazwie: sama końcowa nowa linia nie jest driftem, a indeks dostaje znormalizowaną wersję`, () => {
+      const { root, g } = mini({ [name]: 'x', 'Kod.gs': 'function a() {}\n' });
+      fs.writeFileSync(path.join(root, name), 'x\n');
+      assert.deepEqual(compare(root), { changes: '', patch: '' });
+      assert.equal(g('show', ':' + name), 'x\n', 'indeks ma wersję z końcową nową linią');
+    });
+  }
+
+  test('śledzony plik z wiodącą spacją w nazwie i prawdziwą zmianą treści jest driftem zgłoszonym pod pełną nazwą', () => {
+    const { root } = mini({ ' Sp.gs': 'x', 'Kod.gs': 'function a() {}\n' });
+    fs.writeFileSync(path.join(root, ' Sp.gs'), 'y\n');
+    const r = compare(root);
+    assert.equal(r.changes, ' M  Sp.gs');
+    assert.match(r.patch, /^\+y$/m);
   });
 
   // Charakteryzacja znanego ograniczenia (#318): gdy `git show` kończy się niepowodzeniem, nawet z pełnym stdout, plik jest pomijany i nie jest normalizowany.
@@ -535,26 +543,68 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.deepEqual(compare(root), { changes: '', patch: '' });
   });
 
-  test('białe znaki na końcu ostatniego wiersza raportu są obcinane w całości (dwa NBSP)', () => {
+  // #317: nazwy w raporcie są dosłowne, w tym końcowe białe znaki (wcześniej końcówka raportu była przycinana razem z nazwą).
+  test('końcowe białe znaki w nazwie pliku w ostatnim wierszu raportu zostają w całości (dwa NBSP)', () => {
     const { root, g } = mini(BASE);
     indexOnly(g, root, `appsscript.json/n${NBSP}${NBSP}`, { commit: true });
-    g('config', 'core.quotePath', 'false');
-    assert.equal(compare(root).changes, ' D appsscript.json/n');
+    assert.equal(compare(root).changes, ` D appsscript.json/n${NBSP}${NBSP}`);
   });
 
-  test('jeden końcowy NBSP w ostatnim wierszu raportu jest obcinany', () => {
+  test('jeden końcowy NBSP w nazwie pliku w ostatnim wierszu raportu zostaje', () => {
     const { root, g } = mini(BASE);
     indexOnly(g, root, `appsscript.json/n${NBSP}`, { commit: true });
-    g('config', 'core.quotePath', 'false');
-    assert.equal(compare(root).changes, ' D appsscript.json/n');
+    assert.equal(compare(root).changes, ` D appsscript.json/n${NBSP}`);
   });
 
-  // Charakteryzacja znanego ograniczenia: nazwa nieśledzonego pliku z linii statusu jest przycinana, więc `git add -N` dostaje nieistniejącą ścieżkę (#317).
-  test('znane ograniczenie: nieśledzony plik z wiodącym NBSP w nazwie kończy kontrolę błędem git add -N', () => {
+  test('nieśledzony plik ze spacją w nazwie jest driftem: raport i patch go zawierają, a po przebiegu nic nie zostaje w indeksie', () => {
     const { root, g } = mini(BASE);
-    g('config', 'core.quotePath', 'false');
-    fs.writeFileSync(path.join(root, `${NBSP}Nb.gs`), 'x\n');
-    assert.throws(() => compare(root), /git add -N/);
+    fs.writeFileSync(path.join(root, 'a b.gs'), 'function c() {}\n');
+    const r = compare(root);
+    assert.equal(r.changes, '?? a b.gs');
+    assert.match(r.patch, /^diff --git a\/a b\.gs b\/a b\.gs$/m);
+    assert.match(r.patch, /^\+function c\(\) \{\}$/m);
+    assert.equal(g('diff', '--cached', '--name-only', '-z'), '', 'intent-to-add został cofnięty');
+    assert.equal(g('status', '--porcelain', '-z'), '?? a b.gs\0', 'plik wraca do stanu nieśledzonego');
+  });
+
+  test('nieśledzony plik z wiodącym NBSP w nazwie jest driftem: raport i patch go zawierają (domyślne cytowanie ścieżek w gicie)', () => {
+    const { root } = mini(BASE);
+    fs.writeFileSync(path.join(root, `${NBSP}Nb.gs`), 'function d() {}\n');
+    const r = compare(root);
+    assert.equal(r.changes, `?? ${NBSP}Nb.gs`);
+    assert.match(r.patch, /^\+function d\(\) \{\}$/m);
+  });
+
+  test('nieśledzony plik z nazwą spoza ASCII jest driftem pod pełną nazwą (bez cytowania ósemkowego)', () => {
+    const { root } = mini(BASE);
+    fs.writeFileSync(path.join(root, 'zażółć.gs'), 'function e() {}\n');
+    const r = compare(root);
+    assert.equal(r.changes, '?? zażółć.gs');
+    assert.match(r.patch, /^\+function e\(\) \{\}$/m);
+  });
+
+  test('nieśledzone pliki z nazwami ze spacją obok zmiany w śledzonym pliku: wszystkie w jednym raporcie, wiersze rozdzielone nową linią', () => {
+    const { root } = mini(BASE);
+    fs.writeFileSync(path.join(root, 'GA4.gs'), 'function b() { return 1; }\n');
+    fs.writeFileSync(path.join(root, 'a b.gs'), 'A\n');
+    fs.writeFileSync(path.join(root, 'c d e.gs'), 'B\n');
+    const r = compare(root);
+    assert.equal(r.changes, ' M GA4.gs\n?? a b.gs\n?? c d e.gs');
+    assert.match(r.patch, /^\+A$/m);
+    assert.match(r.patch, /^\+B$/m);
+  });
+
+  test('przemianowanie zatwierdzone w indeksie (git mv) nie jest driftem: wpis o poprzedniej nazwie nie jest czytany jako osobna zmiana', () => {
+    const { root, g } = mini(BASE);
+    g('mv', 'Kod.gs', 'Kod2.gs');
+    assert.deepEqual(compare(root), { changes: '', patch: '' });
+  });
+
+  test('przemianowanie w katalogu roboczym z intent-to-add jest driftem zgłoszonym jako usunięcie i dodanie, bez wpisu o poprzedniej nazwie', () => {
+    const { root, g } = mini(BASE);
+    fs.renameSync(path.join(root, 'Kod.gs'), path.join(root, 'Kod2.gs'));
+    g('add', '-N', '--', 'Kod2.gs');
+    assert.equal(compare(root).changes, ' D Kod.gs\n A Kod2.gs');
   });
 
   test('drift tylko w śledzonym pliku przy zajętym indeksie: bez nieśledzonych plików nic nie sięga po blokadę indeksu', () => {
@@ -564,5 +614,75 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     const r = compare(root);
     assert.equal(r.changes, ' M GA4.gs');
     assert.match(r.patch, /\+function b\(\) \{ return 1; \}/);
+  });
+
+  // Mutanty ocalałe po zmianie z #317: 99:10 i 99:18 (pathspec w układzie z katalogu głównego), 136:7
+  // (`.trim()` przy ls-files Version.gs) i 148:7 (wczesne wyjście bez driftu). Różnica jest obserwowalna
+  // tylko przez argumenty wywołań gita (ślad trace2) albo przez atrapę wyniku gita.
+  function gitCalls(root, fn) {
+    const file = path.join(root, 'trace2.json');
+    process.env.GIT_TRACE2_EVENT = file;
+    try { fn(); } finally { delete process.env.GIT_TRACE2_EVENT; }
+    const events = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const calls = [];
+    for (const e of events) {
+      if (e.event === 'start') calls.push({ argv: e.argv.slice(1), name: null });
+      else if (e.event === 'cmd_name' && calls.length) calls[calls.length - 1].name = e.name;
+    }
+    fs.rmSync(file);
+    return calls.filter(c => c.name);
+  }
+
+  test('układ w katalogu głównym: git dostaje pathspec `*.gs` i `appsscript.json`, bez przedrostka `./`', () => {
+    const { root } = mini(BASE);
+    const calls = gitCalls(root, () => compare(root));
+    const withSpec = calls.filter(c => (c.name === 'ls-files' && c.argv.includes('-z')) || c.name === 'status');
+    assert.equal(withSpec.length, 2, JSON.stringify(calls));
+    for (const c of withSpec) assert.deepEqual(c.argv.slice(c.argv.indexOf('--') + 1), ['*.gs', 'appsscript.json'], c.argv.join(' '));
+  });
+
+  test('układ w katalogu głównym: komunikat błędu gita poza repozytorium niesie dokładne polecenie z pathspec', () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-nogit-'));
+    roots.push(plain);
+    process.env.GIT_CEILING_DIRECTORIES = path.dirname(plain);
+    try {
+      assert.throws(() => compare(plain), e => e.message.startsWith('Command failed: git ls-files -z -- *.gs appsscript.json\n'), 'polecenie w komunikacie');
+    } finally { delete process.env.GIT_CEILING_DIRECTORIES; }
+  });
+
+  test('brak driftu: compare() nie uruchamia git diff (wczesne wyjście), a przy driftcie diff jest uruchamiany', () => {
+    const { root } = mini(BASE);
+    const clean = gitCalls(root, () => assert.deepEqual(compare(root), { changes: '', patch: '' }));
+    assert.deepEqual(clean.filter(c => c.name === 'diff'), [], 'bez zmian żaden diff: ' + JSON.stringify(clean.map(c => c.name)));
+    assert.ok(clean.some(c => c.name === 'status'), 'sonda działa: status widoczny w śladzie');
+    fs.writeFileSync(path.join(root, 'GA4.gs'), 'function b() { return 1; }\n');
+    const dirty = gitCalls(root, () => compare(root));
+    assert.equal(dirty.filter(c => c.name === 'diff').length, 1, 'z driftem dokładnie jeden diff');
+  });
+
+  test('brak driftu przy samej zmianie w indeksie (wpis `M `): też bez git diff', () => {
+    const { root, g } = mini(BASE);
+    fs.writeFileSync(path.join(root, 'GA4.gs'), 'function b() { return 1; }\n');
+    g('add', '--', 'GA4.gs');
+    const calls = gitCalls(root, () => assert.deepEqual(compare(root), { changes: '', patch: '' }));
+    assert.deepEqual(calls.filter(c => c.name === 'diff'), []);
+  });
+
+  test('białe znaki zamiast ścieżki z `git ls-files -- Version.gs` oznaczają „plik nieśledzony”: brak git checkout', () => {
+    const { root } = mini(BASE);
+    const cp = require('child_process');
+    const real = cp.execFileSync;
+    const seen = [];
+    cp.execFileSync = function (cmd, args) {
+      seen.push(args.join(' '));
+      if (cmd === 'git' && args[0] === 'ls-files' && args[args.length - 1] === 'Version.gs') return '\n';
+      return real.apply(this, arguments);
+    };
+    let patched;
+    try { delete require.cache[SCRIPT]; patched = require(SCRIPT); }
+    finally { cp.execFileSync = real; delete require.cache[SCRIPT]; }
+    assert.deepEqual(patched.compare(root), { changes: '', patch: '' });
+    assert.ok(seen.some(s => s === 'ls-files -- Version.gs'), 'atrapa została użyta: ' + seen.join(' | '));
+    assert.ok(!seen.some(s => s.startsWith('checkout')), 'żadnego checkout: ' + seen.join(' | '));
   });
 });
