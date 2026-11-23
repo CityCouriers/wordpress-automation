@@ -17,3 +17,8 @@ Thumbs.db
 
 # Test coverage output
 coverage/
+
+# Testy mutacyjne .gs (StrykerJS, #253): kopie cienia, kopie robocze i raporty przebiegu
+.stryker-shadow/
+.stryker-tmp/
+reports/
