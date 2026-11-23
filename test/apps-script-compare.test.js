@@ -685,4 +685,23 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.ok(seen.some(s => s === 'ls-files -- Version.gs'), 'atrapa została użyta: ' + seen.join(' | '));
     assert.ok(!seen.some(s => s.startsWith('checkout')), 'żadnego checkout: ' + seen.join(' | '));
   });
+
+  // Uwaga z przeglądu „spróbuj to obejść”: nazwa pliku z globem w nazwie była wzorcem w `git add`/`reset`.
+  test('nazwa śledzonego pliku bez końcowej nowej linii z globem (a[1].gs) nie wciąga do indeksu innego pliku (a1.gs)', () => {
+    const { root } = mini({ ...BASE, 'a[1].gs': 'x', 'a1.gs': 'good\n' });
+    fs.writeFileSync(path.join(root, 'a[1].gs'), 'x\n');
+    fs.writeFileSync(path.join(root, 'a1.gs'), 'EVIL();\n');
+    const r = compare(root);
+    assert.equal(r.changes, ' M a1.gs');
+    assert.match(r.patch, /^\+EVIL\(\);$/m);
+  });
+
+  test('polecenia add i reset dostają nazwy plików jako ścieżki dosłowne (--literal-pathspecs): normalizacja indeksu i intent-to-add', () => {
+    const { root } = mini({ ...BASE, 'N.gs': 'x' });
+    fs.writeFileSync(path.join(root, 'N.gs'), 'x\n');
+    fs.writeFileSync(path.join(root, 'U.gs'), 'u\n');
+    const calls = gitCalls(root, () => compare(root)).filter(c => c.name === 'add' || c.name === 'reset');
+    assert.deepEqual(calls.map(c => c.name), ['add', 'add', 'reset'], JSON.stringify(calls));
+    for (const c of calls) assert.equal(c.argv[0], '--literal-pathspecs', c.argv.join(' '));
+  });
 });

@@ -69,6 +69,9 @@ function splitNul(out) {
   return out.split('\0').filter(Boolean);
 }
 
+/** Opcja gita dla poleceń z nazwą pliku z listy: nazwa jest ścieżką dosłowną, nie wzorcem (`a[1].gs`, `*.gs`). */
+const LITERAL = ['--literal-pathspecs'];
+
 function pull(cwd) {
   const override = process.env.APPS_SCRIPT_PULL_CMD;
   // Default runs without a shell; only an explicit override (tests) goes
@@ -123,7 +126,7 @@ function normalizeIndexTrailingNewline(cwd) {
     const indexed = shown.stdout;
     if (!indexed.length || indexed.endsWith('\n')) continue;
     const p = path.join(cwd, f);
-    if (fs.existsSync(p) && fs.readFileSync(p, 'utf8') === indexed + '\n') git(cwd, ['add', '--', f]);
+    if (fs.existsSync(p) && fs.readFileSync(p, 'utf8') === indexed + '\n') git(cwd, [...LITERAL, 'add', '--', f]);
   }
 }
 
@@ -149,9 +152,9 @@ function compare(cwd) {
   const changes = entries.join('\n');
   // Untracked files enter the diff via intent-to-add; reset afterwards.
   const untracked = entries.filter(e => e.startsWith('??')).map(e => e.slice(3));
-  if (untracked.length) git(cwd, ['add', '-N', '--', ...untracked]);
+  if (untracked.length) git(cwd, [...LITERAL, 'add', '-N', '--', ...untracked]);
   const patch = git(cwd, ['--no-pager', 'diff', ...pathspec]);
-  if (untracked.length) git(cwd, ['reset', '-q', '--', ...untracked]);
+  if (untracked.length) git(cwd, [...LITERAL, 'reset', '-q', '--', ...untracked]);
   return { changes, patch };
 }
 
