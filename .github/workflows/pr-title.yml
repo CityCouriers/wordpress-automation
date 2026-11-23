@@ -11,10 +11,11 @@ on:
 permissions:
   pull-requests: read # odczyt tytułu PR-a
 
-# Nowa edycja tytułu albo push zastępuje trwający przebieg: liczy się najnowszy tytuł.
+# Bez anulowania: edycja tytułu nie zmienia SHA, więc anulowany przebieg zostawiłby check cancelled
+# obok nowego na tym samym commicie (ten check jest wymagany przez ochronę gałęzi).
 concurrency:
   group: pr-title-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   pr-title:

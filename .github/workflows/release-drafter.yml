@@ -13,7 +13,7 @@ jobs:
     name: autolabel_pr
     concurrency:
       group: release-drafter-autolabel-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&

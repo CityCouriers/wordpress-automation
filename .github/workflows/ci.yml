@@ -10,11 +10,13 @@ on:
 permissions:
   contents: read
 
-# Nowy push do tego samego PR-a przerywa poprzedni przebieg; przebiegi na main (push) dobiegają końca,
-# bo zapisują cache zakresu main i wynik bramki na tym commicie.
+# Nowy push do tego samego PR-a przerywa poprzedni przebieg (inny commit, stary wynik się nie liczy).
+# Push na main dostaje własną grupę (po SHA), więc żaden commit na main nie traci przebiegu: oczekujący
+# przebieg w tej samej grupie byłby zastępowany kolejnym. Przebieg ready_for_review nie przerywa trwającego
+# na tym samym SHA, bo anulowany przebieg zostawiłby czerwony quality-gate (if: always()) obok zielonego.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'ready_for_review' }}
 
 jobs:
   validate:
