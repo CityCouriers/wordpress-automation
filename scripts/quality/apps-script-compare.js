@@ -64,6 +64,14 @@ function git(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+/** Wyjście gita z opcją -z: wpisy rozdzielone NUL, bez pustych. */
+function splitNul(out) {
+  return out.split('\0').filter(Boolean);
+}
+
+/** Opcja gita dla poleceń z nazwą pliku z listy: nazwa jest ścieżką dosłowną, nie wzorcem (`a[1].gs`, `*.gs`). */
+const LITERAL = ['--literal-pathspecs'];
+
 function pull(cwd) {
   const override = process.env.APPS_SCRIPT_PULL_CMD;
   // Default runs without a shell; only an explicit override (tests) goes
@@ -111,14 +119,14 @@ function normalizeTrailingNewline(cwd) {
  * roboczego katalogu; każda inna różnica zostaje widoczna w status/diff.
  */
 function normalizeIndexTrailingNewline(cwd) {
-  const tracked = git(cwd, ['ls-files', '--', ...sourcePathspec(cwd)]).split('\n').map(s => s.trim()).filter(Boolean);
+  const tracked = splitNul(git(cwd, ['ls-files', '-z', '--', ...sourcePathspec(cwd)]));
   for (const f of tracked) {
     const shown = spawnSync('git', ['show', ':' + f], { cwd, encoding: 'utf8' });
     if (shown.status !== 0) continue;
     const indexed = shown.stdout;
     if (!indexed.length || indexed.endsWith('\n')) continue;
     const p = path.join(cwd, f);
-    if (fs.existsSync(p) && fs.readFileSync(p, 'utf8') === indexed + '\n') git(cwd, ['add', '--', f]);
+    if (fs.existsSync(p) && fs.readFileSync(p, 'utf8') === indexed + '\n') git(cwd, [...LITERAL, 'add', '--', f]);
   }
 }
 
@@ -132,20 +140,21 @@ function compare(cwd) {
     git(cwd, ['checkout', '--', versionFile]);
   }
   const pathspec = ['--', ...sourcePathspec(cwd)];
-  // Keep the leading status columns (" M", "??"); only strip trailing whitespace.
-  // Lines with a change only in the index (e.g. "M  Kod.gs" after the trailing
-  // newline normalisation above) are not drift: drift is worktree vs index.
-  const changes = git(cwd, ['status', '--porcelain', ...pathspec])
-    .split('\n')
-    .filter(l => l.trim() && (l.startsWith('??') || l[1] !== ' '))
-    .join('\n')
-    .replace(/\s+$/, '');
-  if (!changes.trim()) return { changes: '', patch: '' };
+  // Wpisy rozdzielone NUL (-z): git nie cytuje nazw (spacje, NBSP, znaki spoza ASCII),
+  // więc nazw nie wolno przycinać. Zachowujemy wiodące kolumny statusu (" M", "??").
+  // --no-renames: w -z wpis przemianowania ma drugie pole (poprzednia nazwa), które
+  // inaczej byłoby czytane jako osobna zmiana. Wpisy ze zmianą tylko w indeksie
+  // (np. "M  Kod.gs" po normalizacji końcowej nowej linii) nie są driftem:
+  // drift to katalog roboczy względem indeksu.
+  const entries = splitNul(git(cwd, ['status', '--porcelain', '-z', '--no-renames', ...pathspec]))
+    .filter(e => e.startsWith('??') || e[1] !== ' ');
+  if (!entries.length) return { changes: '', patch: '' };
+  const changes = entries.join('\n');
   // Untracked files enter the diff via intent-to-add; reset afterwards.
-  const untracked = changes.split('\n').filter(l => l.startsWith('??')).map(l => l.slice(3).trim());
-  if (untracked.length) git(cwd, ['add', '-N', '--', ...untracked]);
+  const untracked = entries.filter(e => e.startsWith('??')).map(e => e.slice(3));
+  if (untracked.length) git(cwd, [...LITERAL, 'add', '-N', '--', ...untracked]);
   const patch = git(cwd, ['--no-pager', 'diff', ...pathspec]);
-  if (untracked.length) git(cwd, ['reset', '-q', '--', ...untracked]);
+  if (untracked.length) git(cwd, [...LITERAL, 'reset', '-q', '--', ...untracked]);
   return { changes, patch };
 }
 
