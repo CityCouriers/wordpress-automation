@@ -12,11 +12,12 @@ Stryker 10.1.1, runner `command` (`node failfast.js test/apps-script-compare.tes
 | Kontrola zerowa: powtórka Timeoutów pojedynczo (1 proces) | j.w.; zakres linii 45-51, 114, 182 | 47 mutantów: 41 zabitych, 5 Timeout, 1 ocalały |
 | Po zmianie (pełny, 4 procesy) | kod sha256 `1e36d915…69c2`, testy ze zmianą testów nazw | 303 mutanty: **294 zabite, 5 Timeout, 4 ocalałe** |
 | Pośredni zawężony do zmienionych funkcji (4 procesy) | kod sha256 `1e36d915…69c2`, testy z dopisanymi testami zabijającymi ocalałe | linie 66-70 (`splitNul`), 99 (`sourcePathspec`), 118-156 (`normalizeIndexTrailingNewline`, `compare`): 109 mutantów, 109 zabitych |
-| **Końcowy** zawężony do zmienionych funkcji (6 procesów), po poprawce z przeglądu „spróbuj to obejść” (`--literal-pathspecs`) | kod sha256 `d67afcc2…e066`, testy sha256 `df915dd0…88ad` | linie 66-74 (`splitNul`, `LITERAL`), 101-102 (`sourcePathspec`), 121-159 (`normalizeIndexTrailingNewline`, `compare`): **111 mutantów, 111 zabitych, 0 Timeout, 0 ocalałych** |
+| Pośredni 2, zawężony do zmienionych funkcji (6 procesów), po poprawce z przeglądu „spróbuj to obejść” (`--literal-pathspecs`) | kod sha256 `d67afcc2…e066`, testy sha256 `df915dd0…88ad` | linie 66-74 (`splitNul`, `LITERAL`), 101-102 (`sourcePathspec`), 121-159 (`normalizeIndexTrailingNewline`, `compare`): **111 mutantów, 111 zabitych, 0 Timeout, 0 ocalałych** |
+| **Końcowy, pełny (6 procesów)** na tym samym drzewie co HEAD PR (kod sha256 `d67afcc2…e066`, testy `df915dd0…88ad`, drift-testy bez zmian) | po poprawce z przeglądu „spróbuj to obejść” | 305 mutantów: **300 zabitych, 5 Timeout, 0 ocalałych** (wynik 100 %); 5 Timeoutów to pętle nieskończone `parseArgs`, rozliczone niżej |
 
-Sumy kontrolne raportów JSON (artefakty lokalne): kontrola zerowa `aaff484240ac9b0859b02be1c6680b7ff1671801d49d3680a4e639d96fc4dcf2`, powtórka pojedyncza `3338b0830c4f554f5e85d5da8ce9b75d8265e994608a569382526458af01692f`, po zmianie `e0cd5ac4e3228851ac347def010e25d5c2da611d905536934f17c7d6f9975597`, pośredni zawężony `b61f939b0ab7a0bfd36df797cf1e254b9aaf42ccc34efe3e0f94e9ba21cb1894`, końcowy `ee7a3d112c3980278839f1c89c196df32473f26b670e91e98dd2debeab011022`.
+Sumy kontrolne raportów JSON (artefakty lokalne): kontrola zerowa `aaff484240ac9b0859b02be1c6680b7ff1671801d49d3680a4e639d96fc4dcf2`, powtórka pojedyncza `3338b0830c4f554f5e85d5da8ce9b75d8265e994608a569382526458af01692f`, po zmianie `e0cd5ac4e3228851ac347def010e25d5c2da611d905536934f17c7d6f9975597`, pośredni zawężony `b61f939b0ab7a0bfd36df797cf1e254b9aaf42ccc34efe3e0f94e9ba21cb1894`, pośredni 2 `ee7a3d112c3980278839f1c89c196df32473f26b670e91e98dd2debeab011022`, końcowy pełny `b27fa78d1ba2c1dd22a628606d2736bd5aa219d9f9125eabc74c29ede76b0a4e`.
 
-Pomiary zawężone wykonano, bo po pełnym pomiarze „po zmianie” zmieniły się tylko testy (pomiar pośredni) oraz poprawka F2 w trzech wywołaniach `add`/`reset` i stałej `LITERAL` (pomiar końcowy); zakres obejmuje wszystkie funkcje dotknięte zmianą oraz `sourcePathspec`, której mutantów dotyczył audyt. Reszta pliku (m.in. `parseArgs`) nie zmieniła się od pełnego pomiaru „po zmianie”, więc jego wynik pozostaje w mocy.
+Pomiary zawężone (pośrednie) skracały pętlę poprawek; wiążący jest pełny pomiar końcowy na drzewie równym HEAD, który zastępuje wynik pełnego pomiaru „po zmianie” i pomiarów zawężonych.
 
 ## Kontrola zerowa
 
@@ -46,13 +47,13 @@ Zmiana dotyka logiki kontroli CI, więc przed prośbą o audyt przeszła niezale
 
 ## Timeouty
 
-Pięć Timeoutów w pomiarze po zmianie, wszystkie to `i++` → `i--` w `parseArgs` (46:51, 47:56, 48:65, 50:74, 51:72; kod `parseArgs` nie został zmieniony). Reguła właściciela (decyzja właściciela z 2026-11-22): limit czasu liczy się jako wykrycie wyłącznie przy trzech dowodach.
+Pięć Timeoutów w pomiarze po zmianie (i te same pięć w końcowym pełnym), wszystkie to `i++` → `i--` w `parseArgs` (46:51, 47:56, 48:65, 50:74, 51:72; kod `parseArgs` nie został zmieniony). Reguła właściciela (decyzja właściciela z 2026-11-22): limit czasu liczy się jako wykrycie wyłącznie przy trzech dowodach.
 
 - **(a) z kodu:** `value(i++, flaga)` normalnie przesuwa `i` o 2; po mutacji `i` nie zmienia się w iteracji (−1 z mutanta i +1 z nagłówka pętli), pętla wraca do tego samego `argv[i]`, a `value` nie rzuca, więc nie ma wyjścia; ślady `i`: `0,2,2,2,…` (`--label`), `0,2,4,4,…` (`--patch`), `0,0,0,…` (`--cwd`), `0,1,3,3,…` (`--repo-dir`), `0,1,3,5,5,…` (`--ref-dir`).
 - **(b) pojedynczy bieg bez równoległości:** powtórka Stryker z 1 procesem (zakres linii 45-51, 114, 182): wszystkie pięć nadal Timeout; ponadto wycięta funkcja pod `timeout 15`: oryginał kod 0 w ok. 0,14 s, każdy z pięciu mutantów kod 124 po 15 s.
 - **(c) ocena osobnego agenta:** [mutanty-apps-script-compare-timeouty-317.md](mutanty-apps-script-compare-timeouty-317.md), sha256 `00dd1cdee64dbab001795b3e426560b7138c9cb25de67dda66e8ba5bb11cb5f5`. Werdykt: wszystkie pięć to nieskończona pętla dla wejścia z testów, żaden nie jest wolnym testem ani wyjątkiem.
 
-W pomiarze po zmianie nie ma innych Timeoutów.
+W pomiarze po zmianie i w końcowym pełnym nie ma innych Timeoutów (w końcowym pełnym te same pięć pozycji).
 
 ## Testy po zmianie (kryterium 3, uwaga z audytu do #319)
 
