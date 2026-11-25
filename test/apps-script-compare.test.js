@@ -509,20 +509,52 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.match(r.patch, /^\+y$/m);
   });
 
-  // Charakteryzacja znanego ograniczenia (#318): gdy `git show` kończy się niepowodzeniem, nawet z pełnym stdout, plik jest pomijany i nie jest normalizowany.
-  // Prawdziwy blob 1 MiB + 1 B nie nadaje się do tego testu: spawnSync przekraczający maxBuffer ustawia error ENOBUFS, ale status zależy od wyścigu
-  // (null, gdy Node zdąży zabić gita; 0, gdy git zdążył już wyjść; na Linuksie w CI obserwowano oba wyniki dla tego samego kodu). Dlatego wynik
-  // spawnSync dla `git show` jest tu atrapą zgodną z opisem Node dla ENOBUFS (status null, error ENOBUFS, stdout z pełną zawartością).
-  test('znane ograniczenie: gdy git show kończy się niepowodzeniem (ENOBUFS), plik bez końcowej nowej linii nie jest normalizowany', () => {
+  // #318: wyniki gita większe niż domyślny limit 1 MiB (maxBuffer Node) nie mogą kończyć kontroli wyjątkiem ENOBUFS ani fałszywym driftem.
+  // Wejście ma 3 MiB, czyli wyraźnie więcej niż limit: tuż nad granicą wynik zależał od wyścigu (status `null` albo 0, gdy git zdążył wyjść),
+  // a dla wejścia o kilka MiB większego niż limit stdout jest obcięty, a status zawsze `null` (bez atrapy, deterministycznie).
+  const MIB3 = 3 * 1024 * 1024;
+  const wiersze = liczba => 'function f() { return 1234567890; }\n'.repeat(liczba);
+  const LINII = Math.ceil(MIB3 / wiersze(1).length);
+
+  test('diff większy niż 1 MiB: compare() zwraca zmiany i pełny patch, bez wyjątku (ENOBUFS)', () => {
+    const { root } = mini({ 'Kod.gs': wiersze(LINII) });
+    fs.writeFileSync(path.join(root, 'Kod.gs'), wiersze(LINII).replace(/1234567890/g, '0987654321'));
+    const r = compare(root);
+    assert.equal(r.changes, ' M Kod.gs');
+    assert.ok(Buffer.byteLength(r.patch) > 2 * MIB3, `patch ma ${Buffer.byteLength(r.patch)} B, oczekiwano pełnego diffu (usunięte + dodane wiersze)`);
+    assert.equal(r.patch.split('\n').filter(l => l === '+function f() { return 0987654321; }').length, LINII, 'wszystkie dodane wiersze są w patchu');
+    assert.ok(r.patch.endsWith('\n'), 'patch nie jest obcięty w środku wiersza');
+  });
+
+  test('nieśledzony plik większy niż 1 MiB jest driftem: patch zawiera go w całości', () => {
+    const { root } = mini(BASE);
+    fs.writeFileSync(path.join(root, 'Nowy.gs'), wiersze(LINII));
+    const r = compare(root);
+    assert.equal(r.changes, '?? Nowy.gs');
+    assert.equal(r.patch.split('\n').filter(l => l === '+function f() { return 1234567890; }').length, LINII);
+  });
+
+  test('śledzony plik większy niż 1 MiB bez końcowej nowej linii: sama różnica końcowej nowej linii nie jest driftem, a indeks dostaje znormalizowaną wersję', () => {
+    const bezNowejLinii = wiersze(LINII).slice(0, -1);
+    const { root } = mini({ 'Big.gs': bezNowejLinii, 'Kod.gs': 'function a() {}\n' });
+    fs.writeFileSync(path.join(root, 'Big.gs'), bezNowejLinii + '\n');
+    assert.deepEqual(compare(root), { changes: '', patch: '' });
+    // Własny maxBuffer: domyślny 1 MiB uciąłby odczyt pliku w samym teście.
+    const wIndeksie = execFileSync('git', ['show', ':Big.gs'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    assert.equal(wIndeksie.length, bezNowejLinii.length + 1, 'indeks ma cały plik z końcową nową linią (stdout git show nie jest obcięty)');
+    assert.ok(wIndeksie.endsWith('\n'));
+  });
+
+  // Ta sama atrapa dla innej awarii `git show` (np. uszkodzony obiekt, kod wyjścia gita różny od 0): plik jest pomijany, więc różnica zostaje widoczna jako
+  // drift (kierunek bezpieczny: lepiej zgłosić, niż po cichu uznać za zgodny). Dawny test „znane ograniczenie” (#312) utrwalał tu ENOBUFS, który po #318 nie występuje.
+  test('gdy git show kończy się niepowodzeniem (kod wyjścia różny od 0), plik bez końcowej nowej linii nie jest normalizowany i zostaje widoczną różnicą', () => {
     const { root } = mini({ 'Big.gs': 'x', 'Kod.gs': 'function a() {}\n' });
     fs.writeFileSync(path.join(root, 'Big.gs'), 'x\n');
     const cp = require('child_process');
     const real = cp.spawnSync;
     cp.spawnSync = function (cmd, args) {
       const r = real.apply(this, arguments);
-      if (cmd === 'git' && args[0] === 'show') {
-        return { ...r, status: null, error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }) };
-      }
+      if (cmd === 'git' && args[0] === 'show') return { ...r, status: 128, stderr: 'fatal: atrapa' };
       return r;
     };
     let patched;
