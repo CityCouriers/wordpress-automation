@@ -569,6 +569,33 @@ describe('apps-script-compare: spłata ocalałych mutantów (#312)', () => {
     assert.equal(compare(root).changes, '', 'bez atrapy ten sam plik jest normalizowany (sama końcowa nowa linia nie jest driftem)');
   });
 
+  // Przegląd „spróbuj to obejść” (#318): na Linuksie spawnSync, który przekroczył maxBuffer, bywa kończony ze statusem 0, błędem ENOBUFS i OBCIĘTYM stdout.
+  // Obcięty prefiks + „\n” wyglądał wtedy jak sama różnica końcowej nowej linii, więc `git add` kasował brakujący ogon pliku (prawdziwy drift uchodził).
+  // Atrapa odtwarza ten wynik deterministycznie (status 0, error ENOBUFS, stdout = początek bloba); sam `error` ma więc wystarczyć do pominięcia pliku.
+  test('git show ze statusem 0, ale z błędem ENOBUFS i obciętym stdout: plik nie jest normalizowany, obcięty ogon pozostaje driftem', () => {
+    const { root, g } = mini({ 'Big.gs': 'abcdef', 'Kod.gs': 'function a() {}\n' });
+    fs.writeFileSync(path.join(root, 'Big.gs'), 'abc\n');
+    const cp = require('child_process');
+    const real = cp.spawnSync;
+    cp.spawnSync = function (cmd, args) {
+      const r = real.apply(this, arguments);
+      if (cmd === 'git' && args[0] === 'show') return { ...r, status: 0, stdout: 'abc', error: Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' }) };
+      return r;
+    };
+    let patched;
+    try {
+      delete require.cache[SCRIPT];
+      patched = require(SCRIPT);
+    } finally {
+      cp.spawnSync = real;
+      delete require.cache[SCRIPT];
+    }
+    const r = patched.compare(root);
+    assert.equal(r.changes, ' M Big.gs');
+    assert.match(r.patch, /^-abcdef$/m, 'patch pokazuje utracony ogon pliku');
+    assert.equal(g('show', ':Big.gs'), 'abcdef', 'indeks nie dostał obciętej wersji');
+  });
+
   test('zmiana tylko w indeksie, której ścieżka kończy się na ?? (pod appsscript.json/), nie jest driftem', () => {
     const { root, g } = mini(BASE);
     indexOnly(g, root, 'appsscript.json/a??');

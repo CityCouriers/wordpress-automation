@@ -128,7 +128,8 @@ function normalizeIndexTrailingNewline(cwd) {
   const tracked = splitNul(git(cwd, ['ls-files', '-z', '--', ...sourcePathspec(cwd)]));
   for (const f of tracked) {
     const shown = spawnSync('git', ['show', ':' + f], { cwd, encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
-    if (shown.status !== 0) continue;
+    // Samo `status` nie wystarcza: przy przekroczeniu maxBuffer spawnSync bywa kończony ze statusem 0, błędem ENOBUFS i obciętym stdout (Linux).
+    if (shown.error || shown.status !== 0) continue;
     const indexed = shown.stdout;
     if (!indexed.length || indexed.endsWith('\n')) continue;
     const p = path.join(cwd, f);
