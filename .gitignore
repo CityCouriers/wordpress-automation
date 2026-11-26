@@ -22,3 +22,6 @@ coverage/
 .stryker-shadow/
 .stryker-tmp/
 reports/
+
+# Atrapa npx z test/apps-script-compare.test.js (katalog obok testu; po przerwanym teście może zostać)
+test/asc-bin-*/

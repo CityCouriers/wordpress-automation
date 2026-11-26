@@ -65,7 +65,7 @@ Trzy mutanty (114:78, 121:86, 121:93) w pierwszym pomiarze końcowym przy obcią
 
 ## Testy charakteryzujące znane ograniczenia
 
-Trzy testy (mutanty 9, 10, 20) zapisują obecne, błędne zachowanie kodu, bo jedyną obserwowalną różnicą mutanta jest właśnie to ograniczenie. Naprawy poza zakresem #312: #317 (nazwy plików z `git status`/`ls-files` przycinane i bez `-z`) oraz #318 (limit 1 MiB wyniku gita). Naprawa odwróci asercje tych testów.
+Trzy testy (mutanty 9, 10, 20) zapisują obecne, błędne zachowanie kodu, bo jedyną obserwowalną różnicą mutanta jest właśnie to ograniczenie. Naprawy poza zakresem #312: #317 (nazwy plików z `git status`/`ls-files` przycinane i bez `-z`) oraz #318 (limit 1 MiB wyniku gita). Naprawa odwróci asercje tych testów. Aktualizacja: #317 naprawiło część dotyczącą nazw plików i odwróciło testy mutantów 9 i 20 (rozliczenie w [mutanty-apps-script-compare-317.md](mutanty-apps-script-compare-317.md)); test mutanta 10 (limit bufora) czeka na #318.
 
 ### Test mutanta 10 (117:9): atrapa zamiast pliku 1 MiB + 1 B
 
