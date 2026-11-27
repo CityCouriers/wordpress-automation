@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Nowa wersja akcji czeka 7 dni od wydania, zanim Dependabot zaproponuje jej SHA (#296): dłuższa
+    # zwłoka niż domyślne 3 dni daje czas na wykrycie wadliwego albo przejętego wydania. Cooldown
+    # dotyczy tylko aktualizacji wersji; aktualizacje bezpieczeństwa go nie dotyczą
+    # (dokumentacja GitHub: opcje dependabot.yml, `cooldown`).
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "ci"
     groups:
@@ -16,6 +22,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Jak wyżej: 7 dni zwłoki dla aktualizacji wersji zależności (npm), bez wpływu na aktualizacje bezpieczeństwa.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore"
     groups:

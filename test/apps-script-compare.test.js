@@ -273,7 +273,9 @@ describe('apps-script-compare: kontrola zerowa', () => {
 
   test('bez APPS_SCRIPT_PULL_CMD uruchamia `npx clasp pull` w katalogu --cwd', () => {
     const { root, fake } = repo('');
-    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'asc-bin-'));
+    // Atrapa `npx` musi dać się uruchomić, a katalog tymczasowy systemu bywa zamontowany z `noexec` (kontener próby
+    // mutacji, #253): wtedy PATH przeskakuje na prawdziwy `npx`. Katalog leży więc obok testu, nie w os.tmpdir().
+    const bin = fs.mkdtempSync(path.join(__dirname, 'asc-bin-'));
     roots.push(bin);
     const fakeNpx = (okBody, winBody) => {
       if (process.platform === 'win32') fs.writeFileSync(path.join(bin, 'npx.cmd'), winBody);

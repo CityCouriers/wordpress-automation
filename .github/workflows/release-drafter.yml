@@ -10,23 +10,28 @@ permissions:
 
 jobs:
   autolabel_pr:
+    name: autolabel_pr
+    concurrency:
+      group: release-drafter-autolabel-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.fork == false
     permissions:
-      issues: write
-      pull-requests: write
+      issues: write # nakładanie etykiet na PR-y (API etykiet zgłoszeń)
+      pull-requests: write # autolabeler zapisuje etykiety PR-a
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: release-drafter/release-drafter/autolabeler@v7
+      - uses: release-drafter/release-drafter/autolabeler@d1a19e60e81a7e650d00a7de9277f87e439117ea # v7.11.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update_release_draft:
+    name: update_release_draft
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
@@ -37,11 +42,11 @@ jobs:
       group: release-drafter-main
       cancel-in-progress: true
     permissions:
-      contents: write
-      pull-requests: read
+      contents: write # zapis szkicu wydania (draft release); nie publikuje wydania ani tagu
+      pull-requests: read # odczyt scalonych PR-ów do notatek wydania
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: release-drafter/release-drafter@v7
+      - uses: release-drafter/release-drafter@d1a19e60e81a7e650d00a7de9277f87e439117ea # v7.11.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

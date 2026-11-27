@@ -1,0 +1,17 @@
+# Konfiguracja zizmor (#296). Lista wyjątków jest zamknięta: pilnuje jej test/workflow-hardening.test.js
+# (tylko reguła dangerous-triggers, tylko dwa poniższe pliki, każdy wpis z uzasadnieniem nad nim).
+# Nowy wyjątek wymaga uzasadnienia opartego na faktach z pliku i zmiany tego testu w tym samym PR.
+# Wyjątek nie ma pola uzasadnienia w formacie zizmor, więc uzasadnienie to komentarz nad wpisem.
+rules:
+  dangerous-triggers:
+    ignore:
+      # issue_comment: job reconcile ma guard `!github.event.issue.pull_request` i filtr autora
+      # (OWNER/MEMBER/COLLABORATOR; zdarzenie `deleted` przechodzi, bo usunięty werdykt musi zmienić
+      # stan). Pobiera tylko skrypty bramki z domyślnej gałęzi, bez kodu PR i bez cache; zdarzenie
+      # nie niesie kodu z gałęzi roboczej.
+      - issue-audit.yml
+      # pull_request_target: job review-ack pobiera wyłącznie jeden plik skryptu z gałęzi bazowej
+      # (checkout bez ref), nic z PR nie jest wykonywane ani czytane z dysku; test pilnuje braku ref,
+      # odwołań do head PR i cache. issue_comment: job reevaluate filtruje autora (OWNER/MEMBER/
+      # COLLABORATOR oraz trzy boty), nie pobiera kodu i tylko ponawia przebieg review-ack.
+      - review-gate.yml

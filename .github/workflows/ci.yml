@@ -10,19 +10,29 @@ on:
 permissions:
   contents: read
 
+# Nowy push do tego samego PR-a przerywa poprzedni przebieg (inny commit, stary wynik się nie liczy).
+# Push na main dostaje własną grupę (po SHA), więc żaden commit na main nie traci przebiegu: oczekujący
+# przebieg w tej samej grupie byłby zastępowany kolejnym. Przebieg ready_for_review nie przerywa trwającego
+# na tym samym SHA, bo anulowany przebieg zostawiłby czerwony quality-gate (if: always()) obok zielonego.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'ready_for_review' }}
+
 jobs:
   validate:
+    name: validate
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so the coverage gate can diff against the base branch.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -84,23 +94,28 @@ jobs:
       # changed in this PR (.quality/changed-lines-ignore.json for exceptions).
       - name: Unit tests + coverage gate
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # The base SHA needs no origin/<branch> ref, only the full history.
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            npm run quality:gate -- --changed="base:${{ github.event.pull_request.base.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            npm run quality:gate -- --changed="base:$BASE_SHA"
           else
             npm run quality:gate -- --changed=none
           fi
 
   secret-scan:
+    name: secret-scan
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout full history
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # gitleaks-action w organizacji wymaga licencji (GITLEAKS_LICENSE); sam skaner jej nie wymaga.
       # Wersja, SHA-256 i oba kroki jak w CityCouriers/nexus (.github/workflows/secret-scan.yml)
@@ -145,7 +160,9 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Evaluate required jobs
         env:
