@@ -78,15 +78,16 @@ describe('createRecord', () => {
     for (const sha of ['abc123', SHA_A.toUpperCase(), SHA_A + 'a', '$(id)'.padEnd(40, 'a'), '']) {
       await assert.rejects(() => rec.createRecord(fake.ctx, { sha, tag: 'main' }), /SHA checkoutu ma niepoprawną postać/);
     }
-    for (const tag of ['', 'feature/x', 'v', 'V1', 'main2', 'v1\nrm', 'v1 ; rm -rf /', 'master', 'xmain', 'notmain', '1v1.0', 'xv1']) {
-      await assert.rejects(() => rec.createRecord(fake.ctx, { sha: SHA_A, tag }), /DEPLOY_REF musi być "main" albo tagiem v\*/);
+    for (const tag of ['', 'feature/x', 'v', 'V1', 'main2', 'v1\nrm', 'v1 ; rm -rf /', 'master', 'xmain', 'notmain', '1v1.0', 'xv1',
+      'v1.2', 'v1.2.3.4', 'v2.43.0-rc.1', 'v1_x', 'v0', 'v1.2.x', 'v1.2.3\n', 'v1..2.3']) {
+      await assert.rejects(() => rec.createRecord(fake.ctx, { sha: SHA_A, tag }), /DEPLOY_REF musi być "main" albo tagiem vX\.Y\.Z: /);
     }
     assert.equal(fake.state.requests.length, 0);
   });
 
-  test('tagi z kropkami, myślnikami i podkreśleniami są przyjmowane', async () => {
+  test('przyjmowane są wyłącznie main i tagi vX.Y.Z (#296, AC-3)', async () => {
     reset();
-    for (const tag of ['main', 'v2.9.1', 'v2.43.0-rc.1', 'v1_x', 'v0']) {
+    for (const tag of ['main', 'v2.9.1', 'v2.43.0', 'v0.0.0', 'v10.20.300']) {
       await rec.createRecord(fake.ctx, { sha: SHA_A, tag });
     }
     assert.equal(fake.state.deployments.length, 5);

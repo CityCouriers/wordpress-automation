@@ -6,7 +6,7 @@
  *
  * Workflow wdrożenia zapisuje go PO `actions/checkout` i odczycie
  * `git rev-parse HEAD`, więc `ref` rekordu to pełny SHA faktycznie wypchniętego
- * checkoutu, a `payload.tag` to DEPLOY_REF (`main` albo tag `v*`). Automatyczny
+ * checkoutu, a `payload.tag` to DEPLOY_REF (`main` albo tag `vX.Y.Z`). Automatyczny
  * rekord środowiska `production` tego nie dowodzi: opisuje kontekst uruchomienia
  * workflow, nie checkout (rollback uruchomiony z `main`). Dlatego drift check
  * czyta wyłącznie środowisko `apps-script-live`.
@@ -27,7 +27,8 @@ const path = require('path');
 
 const ENVIRONMENT = 'apps-script-live';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
-const TAG_PATTERN = /^(main|v[0-9][0-9A-Za-z._-]*)$/;
+// #296 (AC-3): ten sam ścisły wzorzec co walidacja deploy_ref w deploy-apps-script.yml (test zgodności w apps-script-workflows.test.js).
+const TAG_PATTERN = /^(main|v[0-9]+\.[0-9]+\.[0-9]+)$/;
 const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const FINAL_STATES = ['success', 'failure'];
 const PAGE = 100;
@@ -68,7 +69,7 @@ async function request(ctx, method, route, body) {
 
 function validateRevision(sha, tag) {
   if (!SHA_PATTERN.test(sha)) throw new Error(`Pełny SHA checkoutu ma niepoprawną postać: ${show(sha)}`);
-  if (!TAG_PATTERN.test(tag)) throw new Error(`DEPLOY_REF musi być "main" albo tagiem v*: ${show(tag)}`);
+  if (!TAG_PATTERN.test(tag)) throw new Error(`DEPLOY_REF musi być "main" albo tagiem vX.Y.Z: ${show(tag)}`);
 }
 
 async function setStatus(ctx, id, state, description) {

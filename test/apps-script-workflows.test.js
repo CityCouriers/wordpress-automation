@@ -1,13 +1,15 @@
 'use strict';
 
 /**
- * #297: kształt workflow deployu i drift checku (kolejność kroków, uprawnienia, granica
- * zaufania `compare_ref`) oraz zgodność stempla Version.gs z kanonicznym oczekiwanym plikiem.
+ * #297: kształt workflow deployu i drift checku (kolejność kroków, uprawnienia, rozdział kodu
+ * od danych przy `compare_ref`) oraz zgodność stempla Version.gs z kanonicznym oczekiwanym plikiem.
+ * #296 (AC-3, AC-9 a): ścisły `deploy_ref` (krok walidacji uruchamiany w bash z fałszywym `gh`), ref
+ * rozwiązany raz do SHA, guard ręcznego uruchomienia, niezmieniona lista kroków deployu.
  */
 
 const { test, describe, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -18,6 +20,7 @@ const { runNodeSync } = require('./helpers/node-child');
 // Hook pre-commit w drzewie roboczym ustawia GIT_DIR; `git init` w katalogu tymczasowym pisałby wtedy do prawdziwego repozytorium.
 stripGitEnv();
 const drift = require('../scripts/quality/apps-script-drift');
+const record = require('../scripts/quality/deployment-record');
 
 const WORKFLOWS = path.resolve(__dirname, '..', '.github', 'workflows');
 const deployText = fs.readFileSync(path.join(WORKFLOWS, 'deploy-apps-script.yml'), 'utf8').replace(/\r\n/g, '\n');
@@ -52,7 +55,7 @@ describe('deploy-apps-script.yml: zapis jawnego rekordu wdrożenia', () => {
 
   test('uprawnienie deployments: write tylko dla joba, na górze pliku wyłącznie contents: read', () => {
     assert.match(deployText, /^permissions:\n {2}contents: read\n\n/m);
-    assert.match(deployText, /^ {4}permissions:\n {6}contents: read\n {6}deployments: write\n/m);
+    assert.match(deployText, /^ {4}permissions:\n {6}contents: read\n {6}deployments: write # [^\n]+\n/m);
     assert.equal(deployText.split('\n').filter(l => /deployments: write/.test(l) && !/^\s*#/.test(l)).length, 1);
   });
 
@@ -87,9 +90,9 @@ describe('deploy-apps-script.yml: zapis jawnego rekordu wdrożenia', () => {
     assert.match(list[stepNamed(list, 'Verify the live project matches')].text, /^ {8}id: verify$/m);
   });
 
-  test('narzędzie zapisu rekordu pochodzi z main (sparse checkout), jak narzędzie porównania', () => {
+  test('narzędzie zapisu rekordu pochodzi z main rozwiązanego raz do SHA (sparse checkout), jak narzędzie porównania', () => {
     const s = list[stepNamed(list, 'Checkout deploy tooling from main')];
-    assert.match(s.text, /^ {10}ref: main$/m);
+    assert.match(s.text, /^ {10}ref: \$\{\{ steps\.ref\.outputs\.tooling_sha \}\}$/m);
     assert.match(s.text, /^ {12}scripts\/quality\/apps-script-compare\.js$/m);
     assert.match(s.text, /^ {12}scripts\/quality\/deployment-record\.js$/m);
   });
@@ -134,11 +137,11 @@ describe('deploy-apps-script.yml: zapis jawnego rekordu wdrożenia', () => {
   });
 });
 
-describe('apps-script-drift.yml: granica zaufania i źródło rewizji', () => {
+describe('apps-script-drift.yml: kod z main, rewizja jako dane i źródło rewizji', () => {
   const list = steps(driftText);
 
   test('uprawnienia: contents: read i deployments: read, nic więcej', () => {
-    assert.match(driftText, /^permissions:\n {2}contents: read\n {2}deployments: read\n\n/m);
+    assert.match(driftText, /^permissions:\n {2}contents: read\n {2}deployments: read # [^\n]+\n\n/m);
     assert.doesNotMatch(driftText, /: write/);
   });
 
@@ -211,7 +214,7 @@ describe('zgodność: stempel z kroku deployu mieści się w kanonicznym oczekiw
   }
 
   test('plik zapisany przez krok deployu przechodzi kanoniczne porównanie z rekordem (tag i commit)', () => {
-    for (const [ref, actor] of [['v2.43.0', 'octocat'], ['main', 'dependabot[bot]'], ['v1.0.0-rc.1', 'a-b-c']]) {
+    for (const [ref, actor] of [['v2.43.0', 'octocat'], ['main', 'dependabot[bot]'], ['v10.20.30', 'a-b-c']]) {
       const { text, sha } = stampInRepo(ref, actor);
       assert.deepEqual(drift.versionProblems(text, 'acme/repo', { tag: ref, sha }), [], text);
       assert.equal(text, drift.renderVersionFile(drift.parseVersionFile(text, 'acme/repo'), 'acme/repo'));
@@ -222,5 +225,167 @@ describe('zgodność: stempel z kroku deployu mieści się w kanonicznym oczekiw
     const { text, sha } = stampInRepo('v2.43.0', 'octocat');
     assert.equal(drift.versionProblems(text, 'acme/repo', { tag: 'v2.42.4', sha }).length, 1);
     assert.equal(drift.versionProblems(text, 'acme/repo', { tag: 'v2.43.0', sha: 'f'.repeat(40) }).length, 1);
+  });
+});
+
+describe('pomocnicy testu: steps, runOf, stepNamed (dokładne wyniki, pomiar Stryker #296)', () => {
+  test('steps: podział tylko na początku linii z wcięciem 6, nazwa tylko z pierwszej linii kroku', () => {
+    const text = 'jobs:\n  a:\n    steps:\n      - name: a\n        run: echo "      - b"\n      - uses: o/a@v1\n        with:\n          name: art\n';
+    const list = steps(text);
+    assert.deepEqual(list.map(s => s.name), ['a', undefined]);
+    assert.equal(list[0].text, 'name: a\n        run: echo "      - b"\n');
+  });
+
+  test('runOf: blok, jedna linia, bez spacji po dwukropku, krok bez run, run w pierwszej linii', () => {
+    const block = { text: 'name: a\n        env:\n          run: 1\n        run: |\n          echo 1\n\n          echo 2\n        shell: bash          x\n' };
+    assert.equal(runOf(block), '\n          echo 1\n\n          echo 2');
+    assert.equal(runOf({ text: 'name: a\n        run: echo x' }), 'echo x');
+    assert.equal(runOf({ text: 'name: a\n        run:echo x' }), 'echo x');
+    assert.equal(runOf({ text: '        run: a\n          b' }), 'a\n          b');
+    assert.equal(runOf({ text: 'name: a\n        uses: o/a@v1' }), '');
+  });
+
+  test('stepNamed: indeks także 0, brak kroku to błąd z nazwą', () => {
+    const list = [{ name: 'Pierwszy krok' }, { name: undefined }, { name: 'Drugi' }];
+    assert.equal(stepNamed(list, 'Pierwszy'), 0);
+    assert.equal(stepNamed(list, 'Drugi'), 2);
+    assert.throws(() => stepNamed(list, 'Brak'), { message: 'brak kroku "Brak"' });
+  });
+});
+
+/** Fałszywe `gh` dla kroku walidacji refa: zapisuje wywołania, zwraca SHA z env albo błąd jak API dla nieznanego refa. */
+const FAKE_GH = `gh() {
+  printf '%s\\n' "$*" >> "$GH_LOG"
+  case "$2" in
+    repos/acme/repo/commits/refs/heads/main) if [ -n "$FAKE_MAIN" ]; then printf '%s\\n' "$FAKE_MAIN"; else return 1; fi ;;
+    repos/acme/repo/commits/refs/tags/v2.43.0) printf '%s\\n' "$FAKE_TAG" ;;
+    *) echo 'gh: No commit found (HTTP 422)' >&2; return 1 ;;
+  esac
+}
+`;
+
+/**
+ * Uruchamia skrypt kroku w bash z fałszywym gh; zwraca kod wyjścia, wyjście, zapis GITHUB_OUTPUT, wywołania gh
+ * i ścieżkę katalogu roboczego, który usuwa przed powrotem (prefiks `ref-` w katalogu tymczasowym do kontroli wycieków).
+ */
+function runRefStep(bash, script, env) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ref-'));
+  try {
+    const out = path.join(dir, 'out').replace(/\\/g, '/');
+    const log = path.join(dir, 'gh.log').replace(/\\/g, '/');
+    fs.writeFileSync(out, '');
+    fs.writeFileSync(log, '');
+    const r = spawnSync(bash, ['-c', FAKE_GH + script], {
+      encoding: 'utf8',
+      // GITHUB_EVENT_NAME i GITHUB_REF nadpisane: w CI proces testów ma własne wartości zdarzenia pull_request.
+      env: {
+        ...process.env, GITHUB_OUTPUT: out, GH_LOG: log, GITHUB_REPOSITORY: 'acme/repo', GITHUB_EVENT_NAME: 'workflow_dispatch',
+        GITHUB_REF: 'refs/heads/main', FAKE_MAIN: 'a'.repeat(40), FAKE_TAG: 'b'.repeat(40), ...env
+      }
+    });
+    return { dir, status: r.status, stdout: r.stdout, output: fs.readFileSync(out, 'utf8'), calls: fs.readFileSync(log, 'utf8').split('\n').filter(Boolean) };
+  } finally {
+    fs.rmSync(dir, { recursive: true });
+  }
+}
+
+describe('deploy-apps-script.yml: ścisły deploy_ref, ref rozwiązany raz do SHA, guard main (#296, AC-3, AC-9 a)', () => {
+  const list = steps(deployText);
+  const validate = list[stepNamed(list, 'Validate deploy ref')];
+  const script = runOf(validate);
+  const STRICT = '^(main|v[0-9]+\\.[0-9]+\\.[0-9]+)$';
+  const RE_IN_YAML = (/^ {10}ref_re='([^']*)'$/m.exec(validate.text) || [])[1];
+  // Bash z Git for Windows leży obok git; na Linuksie (CI) bash jest w PATH.
+  const BASH = process.platform === 'win32'
+    ? path.resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '..', '..', '..', 'bin', 'bash.exe')
+    : 'bash';
+  const OK = ['main', 'v2.43.0', 'v0.0.0', 'v10.20.300'];
+  const BAD = ['main2', 'xmain', 'v1/../x', 'v1 x', 'v1.2', 'v1.2.3.4', 'v1.2.3-rc.1', 'refs/heads/main', '', 'V1.2.3', 'v1.2.x',
+    'v1.2.3;id', '$(id)', 'v1.2.3\nmain', 'main\n', "v1.2.3'", 'v1.2.3\n::warning::x'];
+
+  test('wzorzec w powłoce jest dokładnie wzorcem ścisłym i TAG_PATTERN rekordu wdrożenia', () => {
+    assert.equal(RE_IN_YAML, STRICT);
+    assert.equal(record.TAG_PATTERN.source, STRICT);
+    assert.equal(record.TAG_PATTERN.flags, '');
+  });
+
+  test('test na regexie: przyjmuje main i vX.Y.Z, odrzuca resztę', () => {
+    const re = new RegExp(RE_IN_YAML);
+    for (const v of OK) assert.ok(re.test(v), v);
+    for (const v of BAD) assert.ok(!re.test(v), JSON.stringify(v));
+  });
+
+  test('krok w bash: niepoprawny ref odrzucony przed jakimkolwiek wywołaniem gh, jedna linia polecenia ::', () => {
+    for (const v of BAD) {
+      const r = runRefStep(BASH, script, { DEPLOY_REF: v });
+      assert.equal(r.status, 1, JSON.stringify(v));
+      assert.deepEqual(r.calls, [], JSON.stringify(v));
+      assert.equal(r.output, '');
+      assert.equal(r.stdout.split('\n').filter(l => l.startsWith('::')).length, 1, r.stdout);
+      assert.match(r.stdout, /^::error::deploy_ref must be 'main' or a release tag vX\.Y\.Z, got /);
+    }
+  });
+
+  test('krok w bash: main i tag rozwiązane raz do pełnych SHA, narzędzia z SHA main', () => {
+    const m = runRefStep(BASH, script, { DEPLOY_REF: 'main' });
+    assert.equal(m.status, 0, m.stdout);
+    assert.equal(m.output, `deploy_sha=${'a'.repeat(40)}\ntooling_sha=${'a'.repeat(40)}\n`);
+    assert.deepEqual(m.calls, ['api repos/acme/repo/commits/refs/heads/main --jq .sha']);
+    const t = runRefStep(BASH, script, { DEPLOY_REF: 'v2.43.0' });
+    assert.equal(t.status, 0, t.stdout);
+    assert.equal(t.output, `deploy_sha=${'b'.repeat(40)}\ntooling_sha=${'a'.repeat(40)}\n`);
+    assert.deepEqual(t.calls, ['api repos/acme/repo/commits/refs/tags/v2.43.0 --jq .sha', 'api repos/acme/repo/commits/refs/heads/main --jq .sha']);
+    assert.equal(path.dirname(t.dir), path.resolve(os.tmpdir()));
+    assert.match(path.basename(t.dir), /^ref-/);
+    assert.equal(fs.existsSync(t.dir), false, 'katalog roboczy usunięty po biegu');
+  });
+
+  test('krok w bash: ręczne uruchomienie spoza refs/heads/main (także Main) odrzucone przed gh; release z refem taga przechodzi', () => {
+    for (const ref of ['refs/heads/Main', 'refs/heads/MAIN', 'refs/heads/feature', 'refs/tags/v2.43.0', '']) {
+      const r = runRefStep(BASH, script, { DEPLOY_REF: 'main', GITHUB_REF: ref });
+      assert.equal(r.status, 1, ref);
+      assert.deepEqual(r.calls, [], ref);
+      assert.equal(r.output, '', ref);
+      assert.equal(r.stdout.trim(), `::error::manual deploy must be started from refs/heads/main, got ${ref || "''"}`, ref);
+    }
+    const rel = runRefStep(BASH, script, { DEPLOY_REF: 'v2.43.0', GITHUB_EVENT_NAME: 'release', GITHUB_REF: 'refs/tags/v2.43.0' });
+    assert.equal(rel.status, 0, rel.stdout);
+    assert.equal(rel.output, `deploy_sha=${'b'.repeat(40)}\ntooling_sha=${'a'.repeat(40)}\n`);
+  });
+
+  test('krok w bash: nieistniejący ref, nierozwiązany main i odpowiedź bez pełnego SHA kończą się błędem bez zapisu wyjść', () => {
+    const cases = [
+      [{ DEPLOY_REF: 'v9.9.9' }, "::error::ref 'v9.9.9' does not exist in acme/repo"],
+      [{ DEPLOY_REF: 'main', FAKE_MAIN: '' }, "::error::ref 'main' does not exist in acme/repo"],
+      [{ DEPLOY_REF: 'v2.43.0', FAKE_MAIN: '' }, '::error::cannot resolve main in acme/repo'],
+      [{ DEPLOY_REF: 'v2.43.0', FAKE_TAG: 'b'.repeat(39) }, '::error::ref resolution did not return full commit SHAs'],
+      [{ DEPLOY_REF: 'v2.43.0', FAKE_MAIN: 'A'.repeat(40) }, '::error::ref resolution did not return full commit SHAs'],
+      [{ DEPLOY_REF: 'main', FAKE_MAIN: `${'a'.repeat(40)}0` }, '::error::ref resolution did not return full commit SHAs']
+    ];
+    for (const [env, msg] of cases) {
+      const r = runRefStep(BASH, script, env);
+      assert.equal(r.status, 1, JSON.stringify(env));
+      assert.equal(r.stdout.trim(), msg, JSON.stringify(env));
+      assert.equal(r.output, '');
+    }
+  });
+
+  test('oba checkouty biorą SHA z wyjść kroku walidacji; krok ma id ref', () => {
+    assert.match(validate.text, /^ {8}id: ref$/m);
+    assert.match(list[stepNamed(list, 'Checkout ${{ env.DEPLOY_REF }}')].text, /^ {10}ref: \$\{\{ steps\.ref\.outputs\.deploy_sha \}\}$/m);
+    assert.match(list[stepNamed(list, 'Checkout deploy tooling from main')].text, /^ {10}ref: \$\{\{ steps\.ref\.outputs\.tooling_sha \}\}$/m);
+  });
+
+  test('guard: ręczne uruchomienie tylko z refs/heads/main, release bez pre-release (zdarzenie nazwane jawnie, bo null == false)', () => {
+    assert.match(deployText, /^ {4}if: >-\n {6}\(github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'\) \|\|\n {6}\(github\.event_name == 'release' && github\.event\.release\.prerelease == false\)\n/m);
+  });
+
+  test('AC-9 a: te same kroki w tej samej kolejności co przed #296 (guard w if joba, cache usunięty w kroku Setup Node.js)', () => {
+    assert.deepEqual(list.map(s => s.name), [
+      'Validate deploy ref', 'Checkout ${{ env.DEPLOY_REF }}', 'Checkout deploy tooling from main', 'Setup Node.js',
+      'Install dependencies', 'Lint', 'Unit tests + coverage thresholds', 'clasp version', 'Configure clasp credentials',
+      'Stamp deployed version into Version.gs', 'Files that will be pushed', 'Record deployment (in_progress)', 'Push to Apps Script',
+      'Create immutable version', 'Verify the live project matches ${{ env.DEPLOY_REF }}', 'Record deployment result', 'Remove credentials'
+    ]);
   });
 });

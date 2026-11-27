@@ -5,9 +5,10 @@ name: Deploy to Apps Script
 # Triggers:
 #   - release published  → deploys the released tag (pre-releases are skipped)
 #   - workflow_dispatch  → deploys the `deploy_ref` input: `main` (default)
-#                          for a hotfix, or a `v*` tag for a rollback. Always
-#                          start the run from `main` so this workflow definition
-#                          is used; older tags carry older workflow files.
+#                          for a hotfix, or a `vX.Y.Z` tag for a rollback. Start
+#                          the run from `main` so this workflow definition is
+#                          used (older tags carry older workflow files); the job
+#                          `if:` skips a manual run started from any other ref.
 #
 # Either way the `production` environment requires a reviewer to approve the
 # run before any secret is exposed or any file is pushed, and lint must pass
@@ -46,48 +47,77 @@ concurrency:
 
 jobs:
   push:
-    name: clasp push (${{ github.event_name == 'release' && github.event.release.tag_name || inputs.deploy_ref }})
-    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    name: push
+    # #296 (AC-3): ręczne uruchomienie tylko z main (definicja workflow z main),
+    # zanim job wejdzie do środowiska i odczyta sekrety. To zabezpieczenie przed
+    # pomyłką w zatwierdzonym kodzie: gałąź robocza może je usunąć razem z resztą
+    # YAML (ryzyko zaakceptowane przez właściciela, wariant A). release bez zmian.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'release' && github.event.release.prerelease == false)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
-    # deployments: write wyłącznie dla zapisu rekordu wdrożenia (#297).
     permissions:
       contents: read
-      deployments: write
+      deployments: write # wyłącznie zapis rekordu wdrożenia apps-script-live (#297)
     env:
       # Released tag for release events; the deploy_ref input for manual runs.
       DEPLOY_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.deploy_ref }}
       # Every release gets an immutable Apps Script version; manual runs opt in.
       CREATE_VERSION: ${{ github.event_name == 'release' || inputs.create_version == true }}
     steps:
+      # #296 (AC-3): ścisły wzorzec (ten sam co TAG_PATTERN w deployment-record.js)
+      # i jednorazowe rozwiązanie refów do pełnych SHA commitów (tag lekki
+      # i adnotowany: endpoint commits zwraca commit, nie obiekt taga). Oba
+      # checkouty biorą SHA z wyjść tego kroku, więc przesunięcie main albo taga
+      # w trakcie biegu nie zmienia wdrażanego kodu ani narzędzi.
       - name: Validate deploy ref
+        id: ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          case "$DEPLOY_REF" in
-            main) kind=heads ;;
-            v[0-9]*) kind=tags ;;
-            *) echo "::error::deploy_ref must be 'main' or a v* release tag, got '$DEPLOY_REF'"; exit 1 ;;
-          esac
-          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/$kind/$DEPLOY_REF" --jq '.object.sha' >/dev/null 2>&1; then
+          # Guard w if: joba porównuje napisy bez wielkości liter (gałąź Main by przeszła); bash je rozróżnia.
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::manual deploy must be started from refs/heads/main, got $(printf '%q' "$GITHUB_REF")"; exit 1
+          fi
+          ref_re='^(main|v[0-9]+\.[0-9]+\.[0-9]+)$'
+          if [[ ! "$DEPLOY_REF" =~ $ref_re ]]; then
+            echo "::error::deploy_ref must be 'main' or a release tag vX.Y.Z, got $(printf '%q' "$DEPLOY_REF")"; exit 1
+          fi
+          if [ "$DEPLOY_REF" = main ]; then kind=heads; else kind=tags; fi
+          resolve() { gh api "repos/$GITHUB_REPOSITORY/commits/refs/$1" --jq '.sha'; }
+          if ! deploy_sha=$(resolve "$kind/$DEPLOY_REF"); then
             echo "::error::ref '$DEPLOY_REF' does not exist in $GITHUB_REPOSITORY"; exit 1
           fi
-          echo "Deploying $DEPLOY_REF"
+          if [ "$DEPLOY_REF" = main ]; then
+            tooling_sha=$deploy_sha
+          elif ! tooling_sha=$(resolve heads/main); then
+            echo "::error::cannot resolve main in $GITHUB_REPOSITORY"; exit 1
+          fi
+          sha_re='^[0-9a-f]{40}$'
+          if [[ ! "$deploy_sha" =~ $sha_re || ! "$tooling_sha" =~ $sha_re ]]; then
+            echo "::error::ref resolution did not return full commit SHAs"; exit 1
+          fi
+          echo "deploy_sha=$deploy_sha" >> "$GITHUB_OUTPUT"
+          echo "tooling_sha=$tooling_sha" >> "$GITHUB_OUTPUT"
+          echo "Deploying $DEPLOY_REF ($deploy_sha), tooling from main ($tooling_sha)"
 
       - name: Checkout ${{ env.DEPLOY_REF }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.DEPLOY_REF }}
+          ref: ${{ steps.ref.outputs.deploy_sha }}
+          persist-credentials: false
 
-      # Tooling always comes from the workflow's own revision (main), so a
+      # Tooling always comes from main, resolved once to a SHA above, so a
       # rollback to a tag that predates these scripts still gets verified.
       - name: Checkout deploy tooling from main
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ steps.ref.outputs.tooling_sha }}
+          persist-credentials: false
           path: .deploy-tooling
           sparse-checkout: |
             scripts/quality/apps-script-compare.js
@@ -95,14 +125,21 @@ jobs:
             scripts/quality/deployment-record.js
           sparse-checkout-cone-mode: false
 
+      # #296 (AC-3): job z sekretami nie odtwarza cache npm. Cache zapisany na
+      # main jest widoczny dla biegów z innych refów (GitHub Docs, „Restrictions
+      # for accessing a cache”), a setup-node od v5 włącza go sam, gdy
+      # package.json ma pole packageManager; stąd jawne package-manager-cache:
+      # false. CI zachowuje cache (ci.yml, job validate).
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
+          package-manager-cache: false
 
+      # --ignore-scripts: jedyny skrypt instalacyjny to prepare (hook pre-commit),
+      # którego lint, testy i clasp nie potrzebują; zależności nie mają własnych.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Lint
         run: npm run lint

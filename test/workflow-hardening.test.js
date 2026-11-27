@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * #296, PR-1 (AC-1, AC-4, AC-5, część AC-6): twarde zasady plików GitHub, które nie mają sekretów
- * Apps Script. Test strukturalny na tekście YAML (repozytorium nie ma parsera YAML, a nie dokładamy
+ * #296: twarde zasady plików GitHub. PR-1 (AC-1, AC-4, AC-5, część AC-6): wszystkie workflow'y; PR-2 (AC-2, AC-3):
+ * dodatkowe reguły dla workflow'ów z sekretami Apps Script (`apps-script-drift.yml`, `deploy-apps-script.yml`). Test strukturalny na tekście YAML (repozytorium nie ma parsera YAML, a nie dokładamy
  * zależności dla jednego testu): każda reguła to funkcja `check*(tekst)` zwracająca listę zarzutów,
  * dla prawdziwych plików oczekujemy pustej listy, a syntetyczne fixture'y łamiące każdą regułę muszą
  * dać zarzut (test musi umieć paść).
@@ -20,9 +20,16 @@
  * w zakresie decyzji właściciela (wariant A). Bramką rozumiejącą YAML w każdej pisowni są narzędzia z PR-3 (zizmor, pinact,
  * yamllint); po PR-3 #332 sprawdza wykonaniem, które klasy pokrywają.
  *
- * Zakres plików: wszystkie workflow'y poza `apps-script-drift.yml` i `deploy-apps-script.yml`; te dwa
- * (workflow'y z sekretami Apps Script) obejmuje PR-2 zgłoszenia #296 i do tego czasu są na liście
- * ODROCZONE. Ten test nie dowodzi zachowania w runtime ani izolacji sekretów od gałęzi.
+ * Reguły AC-2 dla workflow'ów z sekretami (SEKRETNE): (1) tylko te dwa pliki sięgają do sekretów Apps Script, a każdy plik
+ * sięga do sekretów wyłącznie zapisem `secrets.NAZWA` z zamkniętej listy, (2) wyłącznie dozwolone wyzwalacze, (3) w jobie
+ * z sekretami akcje, polecenia npm i npx z zamkniętych list, bez cache, `continue-on-error` i poleceń git/gh pobierających
+ * kod, (4) checkout tylko z refem z listy pliku (`main` albo SHA z kroku walidacji), a wejścia (`inputs`, `github.event.*`)
+ * wyłącznie w `env:` i `if:`, (5) `persist-credentials: false`, (6) sekret tylko w krokach i kolejność kroków wokół
+ * poświadczeń. W tych dwóch plikach test odrzuca też zapisy YAML, które chowałyby job albo wartość (`checkSecretFormats`:
+ * skalar blokowy poza `run`/`if`/`sparse-checkout`, ucieczki, tagi, kotwice, spacja przed dwukropkiem; przegląd obejść
+ * #296). Te reguły chronią przed pomyłką w zatwierdzonym kodzie, nie przed zmianą
+ * workflow'u na gałęzi roboczej, która dostaje te same sekrety repozytorium (ryzyko zaakceptowane, wariant A). Test nie
+ * dowodzi zachowania w runtime.
  */
 
 const { test, describe } = require('node:test');
@@ -38,10 +45,17 @@ const read = rel => readIn(ROOT, rel);
 /** Pliki YAML z listy nazw katalogu, posortowane (kolejność zwracana przez system plików nie jest gwarantowana). */
 const workflowFiles = names => names.filter(f => /\.ya?ml$/.test(f)).sort();
 
-/** Workflow'y z sekretami Apps Script: zakres PR-2 zgłoszenia #296 (przypięcia, checkouty, nazwy). */
-const ODROCZONE = ['apps-script-drift.yml', 'deploy-apps-script.yml'];
 const WORKFLOW_FILES = workflowFiles(fs.readdirSync(WORKFLOWS));
-const OBJETE = WORKFLOW_FILES.filter(f => !ODROCZONE.includes(f));
+/** Workflow'y z sekretami Apps Script (AC-2 #296): dozwolone wyzwalacze i kroki, które muszą poprzedzać zapis poświadczeń. */
+const NPM_CI = ['npm ci', /^\s*(?:-\s+)?run:\s*npm ci\b/m];
+const SEKRETNE = {
+  'apps-script-drift.yml': { triggers: ['schedule', 'workflow_dispatch'], before: [NPM_CI], refs: ['main'] },
+  'deploy-apps-script.yml': {
+    triggers: ['release', 'workflow_dispatch'],
+    before: [NPM_CI, ['lint', /^\s*(?:-\s+)?run:\s*npm run lint\b/m], ['testy', /npm run quality:gate|npm test\b/]],
+    refs: ['${{ steps.ref.outputs.deploy_sha }}', '${{ steps.ref.outputs.tooling_sha }}']
+  }
+};
 /** Nazwy checków wymaganych przez ochronę gałęzi i przez agregat jakości; zmiana nazwy joba je zrywa. */
 const WYMAGANE_NAZWY = ['validate', 'secret-scan', 'quality-gate', 'pr-title', 'review-ack'];
 
@@ -347,14 +361,168 @@ function checkDependabot(text) {
   return bad;
 }
 
-describe('workflow\'y bez sekretów Apps Script: stan prawdziwych plików', () => {
-  test('lista objętych plików nie jest pusta i nie zawiera workflow\'ów z odroczonego zakresu', () => {
-    assert.ok(OBJETE.length >= 8, `objęte: ${OBJETE.join(', ')}`);
-    for (const f of ODROCZONE) assert.ok(!OBJETE.includes(f));
-    for (const f of ODROCZONE) assert.ok(WORKFLOW_FILES.includes(f), `odroczony plik ${f} nie istnieje: zaktualizuj listę`);
+/**
+ * AC-2 pkt 1: sekrety Apps Script w zapisie z kropką. Nazwy sekretów i kontekstów GitHub nie rozróżniają wielkości liter.
+ * Każdy inny zapis dostępu do sekretów (`secrets[...]`, `toJSON(secrets)`, `secrets.*`, `secrets: inherit`, ucieczka YAML
+ * w nazwie, sekret spoza listy) jest odrzucany we wszystkich plikach (zamknięta lista, przegląd obejść #296).
+ */
+const SEKRET_APPS_SCRIPT = /\bsecrets\s*\.\s*(?:CLASPRC_JSON|APPS_SCRIPT_ID)\b/i;
+const SEKRET_INNY_ZAPIS = /\bsecrets\b(?!\s*\.\s*(?:GITHUB_TOKEN|CLASPRC_JSON|APPS_SCRIPT_ID)\b)/i;
+
+/** AC-2 pkt 1: do sekretów Apps Script sięgają wyłącznie workflow'y z listy SEKRETNE; sekrety tylko z zamkniętej listy nazw. */
+function checkSecretUse(text, name) {
+  const code = withoutComments(text);
+  const bad = [];
+  if (SEKRET_INNY_ZAPIS.test(code)) bad.push(`${name}: dostęp do sekretów inny niż secrets.GITHUB_TOKEN, secrets.CLASPRC_JSON i secrets.APPS_SCRIPT_ID`);
+  if (!Object.keys(SEKRETNE).includes(name) && SEKRET_APPS_SCRIPT.test(code)) {
+    bad.push(`${name}: odwołanie do sekretów Apps Script poza ${Object.keys(SEKRETNE).join(' i ')}`);
+  }
+  return bad;
+}
+
+/** Klucze, przy których workflow'y z sekretami mogą mieć skalar blokowy `|`/`>` (treść bloku innego klucza podrabiałaby linie). */
+const KLUCZE_BLOKOWE = ['run', 'if', 'sparse-checkout'];
+
+/**
+ * Zapisy YAML, które w workflow'ach z sekretami chowałyby job, krok albo wartość przed regułami AC-2 (przegląd obejść #296):
+ * skalar blokowy poza KLUCZE_BLOKOWE, ucieczka `\x`/`\u`/`\U` w cudzysłowie, tag `!`, kotwica albo alias, klucz ze spacją
+ * przed dwukropkiem. W tych dwóch plikach nie ma żadnego z tych zapisów, więc test je odrzuca zamiast zgadywać.
+ */
+function checkSecretFormats(text, name) {
+  const bad = [];
+  for (const line of yamlOnly(text).split('\n')) {
+    const block = /^\s*(?:-\s+)?([^\s:#][^:#]*?)\s*:\s*[|>][+\-\d]*\s*(?:#.*)?$/.exec(line);
+    if (block && !KLUCZE_BLOKOWE.includes(block[1])) bad.push(`${name}: skalar blokowy przy kluczu ${block[1]} nieobsługiwany przez test`);
+    if (/\\[xuU]/.test(line)) bad.push(`${name}: sekwencja ucieczki YAML (\\x, \\u, \\U) nieobsługiwana przez test: ${line.trim().slice(0, 60)}`);
+    if (/(?:^\s*(?:-\s+)?|:\s+)[!&*]/.test(line)) bad.push(`${name}: tag, kotwica albo alias nieobsługiwane przez test: ${line.trim().slice(0, 60)}`);
+    if (/^\s*(?:-\s+)?[\w.-]+\s+:(?:\s|$)/.test(line)) bad.push(`${name}: klucz ze spacją przed dwukropkiem nieobsługiwany przez test: ${line.trim().slice(0, 60)}`);
+  }
+  return bad;
+}
+
+/** AC-2 pkt 2: wyzwalacze workflow'u z sekretami wyłącznie z listy dozwolonych; każda linia bloku `on:` rozpoznana. */
+function checkSecretTriggers(text, name, allowed) {
+  const found = triggers(text);
+  if (!found.length) return [`${name}: brak rozpoznanych wyzwalaczy`];
+  // Rozpoznany wyzwalacz oznacza, że blok `on:` istnieje.
+  const body = topBlock(text, 'on').filter(l => l.trim() !== '' && !isComment(l));
+  const bad = found.filter(t => !allowed.includes(t)).map(t => `${name}: wyzwalacz ${t} poza dozwolonymi (${allowed.join(', ')})`);
+  if (body.filter(l => indentOf(l) === indentOf(body[0])).length !== found.length) bad.push(`${name}: wyzwalacz w zapisie nieobsługiwanym przez test`);
+  return bad;
+}
+
+/** Bezpośrednie dzieci klucza `key:` w kroku (wcięcie pierwszego dziecka); głębsze linie to treść innych kluczy. */
+function childrenOf(stepText, key) {
+  const block = blockOf(stepText, key).filter(l => l.trim() !== '' && !isComment(l));
+  return block.filter(l => indentOf(l) === indentOf(block[0]));
+}
+
+/** Akcje dozwolone w jobach z sekretami (zamknięta lista). */
+const AKCJE_W_JOBIE_Z_SEKRETAMI = ['actions/checkout', 'actions/setup-node', 'actions/upload-artifact'];
+/** Jedyne wywołania npm w jobach z sekretami (dokładne linie poleceń, bez dopisków po nich). */
+const NPM_W_JOBIE_Z_SEKRETAMI = ['npm ci --ignore-scripts', 'npm run lint', 'npm run quality:gate -- --changed=none', 'npm test'];
+
+/**
+ * AC-2 pkt 3 i AC-3: w jobie z sekretami tylko akcje z zamkniętej listy (bez cache i artefaktów do pobrania), setup-node
+ * z `package-manager-cache: false`, npm wyłącznie w dokładnych poleceniach z listy (instalacja z `--ignore-scripts`),
+ * npx tylko dla clasp i eslint, bez `continue-on-error` i bez poleceń git/gh pobierających kod spoza `main` albo SHA.
+ */
+function checkSecretJobDeps(text, name) {
+  const bad = [];
+  const list = jobs(text);
+  if (!list.length) bad.push(`${name}: brak rozpoznanych jobów`);
+  for (const job of list) {
+    const where = `${name}: job ${job.id}:`;
+    for (const step of steps(job.text)) {
+      const uses = /^\s*(?:-\s+)?uses:\s*([^@\s]+)/m.exec(step);
+      if (!uses) continue;
+      if (!AKCJE_W_JOBIE_Z_SEKRETAMI.includes(uses[1])) bad.push(`${where} akcja ${uses[1]} poza listą dozwolonych w jobie z sekretami`);
+      if (uses[1] !== 'actions/setup-node') continue;
+      const w = childrenOf(step, 'with');
+      if (w.some(l => /^\s*cache:/.test(l))) bad.push(`${where} setup-node z cache`);
+      if (!w.some(l => /^\s*package-manager-cache:\s*false\s*(?:#.*)?$/.test(l))) bad.push(`${where} setup-node bez package-manager-cache: false`);
+    }
+    for (const line of withoutComments(job.text).split('\n')) {
+      const cmd = line.replace(/^\s*(?:-\s+)?(?:run:\s*)?/, '').trimEnd();
+      if (/\bnpm\b/.test(line) && !NPM_W_JOBIE_Z_SEKRETAMI.includes(cmd)) bad.push(`${where} npm poza listą dozwolonych poleceń: ${line.trim()}`);
+      if (/\bnpx\s+(?!(?:clasp|eslint)\s)/.test(line)) bad.push(`${where} npx poza clasp i eslint: ${line.trim()}`);
+      if (/^\s*(?:-\s+)?continue-on-error:/.test(line)) bad.push(`${where} continue-on-error w jobie z sekretami`);
+      if (/\bgit\s+(?:fetch|pull|checkout|switch|clone|worktree|merge|cherry-pick|restore|reset|rebase|am|apply)\b|\bgh\s+(?:run|release|pr|repo|gist)\b/.test(line)) {
+        bad.push(`${where} polecenie git/gh pobierające kod albo artefakty: ${line.trim()}`);
+      }
+    }
+  }
+  return bad;
+}
+
+/** Najbliższa wcześniejsza linia o mniejszym wcięciu (rodzic w YAML), z pominięciem pustych i komentarzy. */
+function parentLine(lines, i) {
+  return lines.slice(0, i).reverse().find(l => l.trim() !== '' && !isComment(l) && indentOf(l) < indentOf(lines[i]));
+}
+
+/**
+ * Linia z wejściem: `inputs` w dowolnym zapisie, `github.event*`, `github.head_ref`, `github[...]`, plik zdarzenia, a w wyrażeniu
+ * `${{ }}` także cały kontekst `github` (np. `toJSON(github)`).
+ */
+const WEJSCIE = /\binputs\b|\bgithub\s*(?:\.\s*(?:event|head_ref)\b|\[)|GITHUB_EVENT_PATH|\$\{\{[^}]*\bgithub\b(?!\s*\.\s*\w)/i;
+
+/**
+ * AC-2 pkt 4: checkout w jobie z sekretami tylko z refem z listy pliku (`refs` w SEKRETNE), bez `repository`, z
+ * `persist-credentials: false` jako bezpośrednimi dziećmi `with:`; wejścia tylko jako dane w `env:` i w warunkach `if:`.
+ */
+function checkSecretJobRefs(text, name, refs) {
+  const bad = [];
+  for (const job of jobs(text)) {
+    for (const step of steps(job.text)) {
+      if (!/^\s*(?:-\s+)?uses:\s*actions\/checkout@/m.test(step)) continue;
+      const w = childrenOf(step, 'with');
+      if (w.some(l => /^\s*repository:/.test(l))) bad.push(`${name}: job ${job.id}: checkout z repository`);
+      if (!w.some(l => refs.includes((/^\s*ref:\s*(.*?)\s*$/.exec(l) || [])[1]))) bad.push(`${name}: job ${job.id}: checkout bez ref z listy (${refs.join(', ')})`);
+      if (!w.some(l => /^\s*persist-credentials:\s*false\s*(?:#.*)?$/.test(l))) bad.push(`${name}: job ${job.id}: checkout bez persist-credentials: false w with`);
+    }
+    const lines = job.text.split('\n');
+    lines.forEach((line, i) => {
+      if (isComment(line) || !WEJSCIE.test(line)) return;
+      if (/^\s*(?:-\s+)?if:/.test(line) || /^\s*(?:-\s+)?(?:env|if):/.test(parentLine(lines, i))) return;
+      bad.push(`${name}: job ${job.id}: wejście poza env i if: ${line.trim().slice(0, 60)}`);
+    });
+  }
+  return bad;
+}
+
+/**
+ * AC-2 pkt 6: sekret Apps Script wyłącznie w krokach (nie w `env:` workflow'u ani joba); kroki z listy poprzedzają pierwszy
+ * krok z sekretem; ostatni krok ma jako własne klucze `if: always()` i `run:` usuwające poświadczenia.
+ */
+function checkSecretStepOrder(text, name, before) {
+  const bad = [];
+  const inSteps = jobs(text).flatMap(job => steps(job.text)).join('\n');
+  const count = t => withoutComments(t).split('\n').filter(l => SEKRET_APPS_SCRIPT.test(l)).length;
+  if (count(text) !== count(inSteps)) bad.push(`${name}: sekret Apps Script poza krokami (env albo if workflow'u lub joba)`);
+  for (const job of jobs(text)) {
+    const list = steps(job.text);
+    const cred = list.findIndex(s => SEKRET_APPS_SCRIPT.test(withoutComments(s)));
+    if (cred < 0) { bad.push(`${name}: job ${job.id}: brak kroku z sekretami Apps Script`); continue; }
+    for (const [label, re] of before) {
+      const at = list.findIndex(s => re.test(s));
+      if (at < 0 || at >= cred) bad.push(`${name}: job ${job.id}: ${label} nie poprzedza kroku z sekretami`);
+    }
+    const last = list[list.length - 1];
+    const key = `^ {${indentOf(last)}}(?:- |  )`;
+    if (!new RegExp(`${key}if:\\s*always\\(\\)\\s*$`, 'm').test(last) || !new RegExp(`${key}run:\\s*rm -f "\\$HOME/\\.clasprc\\.json"`, 'm').test(last)) {
+      bad.push(`${name}: job ${job.id}: ostatni krok nie usuwa poświadczeń z if: always()`);
+    }
+  }
+  return bad;
+}
+
+describe('workflow\'y: stan prawdziwych plików', () => {
+  test('lista plików obejmuje oba workflow\'y z sekretami Apps Script', () => {
+    assert.ok(WORKFLOW_FILES.length >= 10, `pliki: ${WORKFLOW_FILES.join(', ')}`);
+    for (const f of Object.keys(SEKRETNE)) assert.ok(WORKFLOW_FILES.includes(f), `plik ${f} nie istnieje: zaktualizuj SEKRETNE`);
   });
 
-  for (const f of OBJETE) {
+  for (const f of WORKFLOW_FILES) {
     const text = read(`.github/workflows/${f}`);
     test(`${f}: brak wyrażeń \${{ }} w run/script/shell (wartości przez env)`, () => assert.deepEqual(checkNoExpressionsInScripts(text, f), []));
     test(`${f}: zapis uprawnień tylko na poziomie joba, każde uprawnienie z komentarzem`, () => assert.deepEqual(checkPermissions(text, f), []));
@@ -362,18 +530,24 @@ describe('workflow\'y bez sekretów Apps Script: stan prawdziwych plików', () =
     test(`${f}: checkout z persist-credentials: false w with`, () => assert.deepEqual(checkCheckoutCredentials(text, f), []));
     test(`${f}: każdy job ma nazwę równą id`, () => assert.deepEqual(checkJobNames(text, f), []));
     test(`${f}: concurrency`, () => assert.deepEqual(checkConcurrency(text, f), []));
-  }
-
-  for (const f of WORKFLOW_FILES) {
-    const text = read(`.github/workflows/${f}`);
     test(`${f}: tylko zapisy YAML obsługiwane przez test, uprawnienia na górze, bez komentarza zizmor: ignore`, () => {
       assert.deepEqual([...checkFormats(text, f), ...checkTopPermissions(text, f), ...checkNoInlineZizmorIgnore(text, f)], []);
     });
+    test(`${f}: sekrety Apps Script tylko w workflow'ach z listy SEKRETNE (AC-2 pkt 1)`, () => assert.deepEqual(checkSecretUse(text, f), []));
   }
 
-  test('workflow z odroczonego zakresu też nie ma wyrażeń w run/script/shell (stan z #297 zachowany)', () => {
-    for (const f of ODROCZONE) assert.deepEqual(checkNoExpressionsInScripts(read(`.github/workflows/${f}`), f), []);
-  });
+  for (const [f, rules] of Object.entries(SEKRETNE)) {
+    const text = read(`.github/workflows/${f}`);
+    test(`${f}: AC-2 pkt 2, 3, 4 i 6 (wyzwalacze, cache i instalacja, refy i wejścia, kolejność kroków)`, () => {
+      assert.deepEqual([
+        ...checkSecretTriggers(text, f, rules.triggers),
+        ...checkSecretJobDeps(text, f),
+        ...checkSecretFormats(text, f),
+        ...checkSecretJobRefs(text, f, rules.refs),
+        ...checkSecretStepOrder(text, f, rules.before)
+      ], []);
+    });
+  }
 
   test('nazwy checków wymaganych przez ochronę gałęzi i agregat jakości istnieją jako nazwy jobów', () => {
     const names = new Set();
@@ -897,5 +1071,272 @@ describe('dokładne wyniki kontroli: komunikaty, numery linii, granice wcięć i
     assert.deepEqual(checkFormats('name: reuses:\n', 'f'), []);
     assert.deepEqual(checkFormats('steps:\n  - name: a\n    uses:\n      x/y@v1\n', 'f'), [val]);
     assert.deepEqual(checkFormats('steps:\n  -  uses:\n      x/y@v1\n', 'f'), [val]);
+  });
+});
+
+describe('AC-2: kontrole ujemne reguł dla workflow\'ów z sekretami Apps Script', () => {
+  const SHA = 'a'.repeat(40);
+  const DEPLOY = SEKRETNE['deploy-apps-script.yml'];
+  const DEPLOY_SHA = '${{ steps.ref.outputs.deploy_sha }}';
+  const TOOLING_SHA = '${{ steps.ref.outputs.tooling_sha }}';
+  const GOOD = [
+    'name: X', '', 'on:', '  # komentarz w bloku on', '  release:', '    types: [published]', '', '  workflow_dispatch:', '',
+    'permissions:', '  contents: read', '', 'jobs:', '  push:', '    name: push', '    if: >-',
+    "      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||",
+    "      (github.event_name == 'release' && github.event.release.prerelease == false)",
+    '    env:', '      DEPLOY_REF: ${{ inputs.deploy_ref }}', '', '      # komentarz w env', '      TAG: ${{ github.event.release.tag_name }}',
+    '    steps:',
+    '      - name: Ref', '        id: ref', '        env:', '          X: ${{ inputs.deploy_ref }}', '        run: echo ok',
+    '      - name: Checkout', `        uses: actions/checkout@${SHA} # v7`, '        with:', `          ref: ${DEPLOY_SHA}`, '          persist-credentials: false',
+    '      - name: Tooling', `        uses: actions/checkout@${SHA} # v7`, '        with:', `          ref: ${TOOLING_SHA}`, '          persist-credentials: false',
+    '          sparse-checkout: |', '            scripts/a.js',
+    '      - name: Node', `        uses: actions/setup-node@${SHA} # v7`, '        with:', '          node-version: 22', '          package-manager-cache: false # powód',
+    '      - name: Install', '        run: npm ci --ignore-scripts',
+    '      - name: Lint', '        run: npm run lint',
+    '      - name: Tests', '        run: npm test',
+    '      - name: Creds', '        env:', '          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}', '        run: npx clasp --version',
+    '      - name: Remove credentials', '        if: always()', '        run: rm -f "$HOME/.clasprc.json" .clasp.json', ''
+  ].join('\n');
+  const swap = (a, b) => {
+    assert.ok(GOOD.includes(a), `fixture zawiera ${a}`);
+    return GOOD.replace(a, b);
+  };
+  /** Dodatkowy krok przed krokiem Lint. */
+  const step = body => swap('      - name: Lint\n', `${body}\n      - name: Lint\n`);
+  const job = 'f: job push: ';
+  const all = text => [
+    ...checkSecretTriggers(text, 'f', DEPLOY.triggers), ...checkSecretFormats(text, 'f'), ...checkSecretJobDeps(text, 'f'),
+    ...checkSecretJobRefs(text, 'f', DEPLOY.refs), ...checkSecretStepOrder(text, 'f', DEPLOY.before)
+  ];
+
+  test('wzorcowy workflow z sekretami przechodzi wszystkie reguły', () => {
+    assert.deepEqual(all(GOOD), []);
+    assert.deepEqual(checkSecretUse(GOOD, 'deploy-apps-script.yml'), []);
+    assert.deepEqual(checkSecretUse(GOOD, 'apps-script-drift.yml'), []);
+  });
+
+  test('pkt 1: sekret Apps Script poza listą SEKRETNE; każdy zapis dostępu do sekretów poza secrets.NAZWA z listy', () => {
+    const poza = 'ci.yml: odwołanie do sekretów Apps Script poza apps-script-drift.yml i deploy-apps-script.yml';
+    const inny = 'ci.yml: dostęp do sekretów inny niż secrets.GITHUB_TOKEN, secrets.CLASPRC_JSON i secrets.APPS_SCRIPT_ID';
+    assert.deepEqual(checkSecretUse(GOOD, 'ci.yml'), [poza]);
+    for (const ref of ['SECRETS.clasprc_json', 'secrets . APPS_SCRIPT_ID', 'secrets.\nAPPS_SCRIPT_ID']) {
+      assert.deepEqual(checkSecretUse(`a: \${{ ${ref} }}\n`, 'ci.yml'), [poza], ref);
+    }
+    for (const ref of ["secrets['CLASPRC_JSON']", 'toJSON(secrets)', "toJSON(secrets || '')", 'toJSON(secrets.*)', 'secrets.\\x43LASPRC_JSON',
+      'secrets.CLASPRC_JSONX', 'secrets.OTHER', 'secrets . GITHUB_TOKENX', 'secrets']) {
+      assert.deepEqual(checkSecretUse(`a: \${{ ${ref} }}\n`, 'ci.yml'), [inny], ref);
+    }
+    for (const t of ['jobs:\n  a:\n    secrets: inherit\n', "    secrets: 'inherit'\n", '    secrets: !!str inherit\n', 'secrets:\n']) {
+      assert.deepEqual(checkSecretUse(t, 'ci.yml'), [inny], t);
+    }
+    assert.deepEqual(checkSecretUse('a: ${{ toJSON(secrets) }}\n', 'deploy-apps-script.yml'),
+      ['deploy-apps-script.yml: dostęp do sekretów inny niż secrets.GITHUB_TOKEN, secrets.CLASPRC_JSON i secrets.APPS_SCRIPT_ID']);
+    for (const ok of ['a: ${{ secrets.GITHUB_TOKEN }}', 'a: ${{ Secrets . github_token }}', '# ${{ secrets.CLASPRC_JSON }}', 'a: ${{ mysecrets.X }}', 'secretsx: 1']) {
+      assert.deepEqual(checkSecretUse(`${ok}\n`, 'ci.yml'), [], ok);
+    }
+  });
+
+  test('zapisy YAML w workflow\'ach z sekretami: skalar blokowy poza run/if/sparse-checkout, ucieczki, tagi, kotwice, spacja przed dwukropkiem', () => {
+    for (const ok of ['      - run: |\n          printf "\\x41 & *"\n', '    if: >-\n', '          sparse-checkout:  |  # c\n', '  - if: |+2\n',
+      '    x: a&b*c!\n', '    a: b : c\n', '    x: "\\n"\n', '# x: !tag\n']) {
+      assert.deepEqual(checkSecretFormats(ok, 'f'), [], ok);
+    }
+    for (const [t, key] of [['          ssh-known-hosts: |\n', 'ssh-known-hosts'], ['      NOTE: >-\n', 'NOTE'], ['      - script: |\n', 'script'],
+      ['      - name: |-\n', 'name'], ['          scope: >2 # c\n', 'scope'], ['  runx: |\n', 'runx']]) {
+      assert.deepEqual(checkSecretFormats(t, 'f'), [`f: skalar blokowy przy kluczu ${key} nieobsługiwany przez test`], t);
+    }
+    const long = `      - run: "npx clasp --version; echo $\\x7B{ \\x69nputs.deploy_ref }} ${'x'.repeat(40)}"`;
+    for (const t of ['    x: "\\x41"', '    x: "\\u0041"', '    x: "\\U00000041"', long]) {
+      assert.deepEqual(checkSecretFormats(`${t}\n`, 'f'), [`f: sekwencja ucieczki YAML (\\x, \\u, \\U) nieobsługiwana przez test: ${t.trim().slice(0, 60)}`], t);
+    }
+    for (const t of ['  evil: &0', '  !!str evil:', '      - !x a', '        run: *0', '    secrets: !!str inherit', `    X: &a ${'y'.repeat(70)}`]) {
+      assert.deepEqual(checkSecretFormats(`${t}\n`, 'f'), [`f: tag, kotwica albo alias nieobsługiwane przez test: ${t.trim().slice(0, 60)}`], t);
+    }
+    for (const t of ['  evil :', '      - uses : actions/cache@v4', '  a  :', `  ${'k'.repeat(70)} : 1`]) {
+      assert.deepEqual(checkSecretFormats(`${t}\n`, 'f'), [`f: klucz ze spacją przed dwukropkiem nieobsługiwany przez test: ${t.trim().slice(0, 60)}`], t);
+    }
+  });
+
+  test('pkt 2: wyzwalacz spoza listy, brak bloku on, zapis nieobsługiwany, linia z samych spacji', () => {
+    for (const t of ['push', 'pull_request', 'pull_request_target', 'issue_comment', 'workflow_run']) {
+      assert.deepEqual(checkSecretTriggers(swap('  workflow_dispatch:\n', `  workflow_dispatch:\n  ${t}:\n`), 'f', DEPLOY.triggers),
+        [`f: wyzwalacz ${t} poza dozwolonymi (release, workflow_dispatch)`]);
+    }
+    assert.deepEqual(checkSecretTriggers('name: X\n', 'f', DEPLOY.triggers), ['f: brak rozpoznanych wyzwalaczy']);
+    assert.deepEqual(checkSecretTriggers('on:\n  - release\n', 'f', DEPLOY.triggers), ['f: brak rozpoznanych wyzwalaczy']);
+    assert.deepEqual(checkSecretTriggers(swap('  workflow_dispatch:\n', '  workflow_dispatch:\n  "push":\n'), 'f', DEPLOY.triggers),
+      ['f: wyzwalacz w zapisie nieobsługiwanym przez test']);
+    assert.deepEqual(checkSecretTriggers(swap('  # komentarz w bloku on\n', '  # komentarz w bloku on\n  \n'), 'f', DEPLOY.triggers), []);
+  });
+
+  test('pkt 3 i AC-3: akcje spoza listy, setup-node z cache albo bez package-manager-cache: false (tylko bezpośrednie dzieci with)', () => {
+    for (const u of [`actions/cache@${SHA}`, `actions/cache/restore@${SHA}`, `actions/download-artifact@${SHA}`, `someorg/cache@${SHA}`, './local', `Actions/Checkout@${SHA}`]) {
+      const name = u.split('@')[0];
+      assert.deepEqual(checkSecretJobDeps(step(`      - uses: ${u} # v4`), 'f'), [`${job}akcja ${name} poza listą dozwolonych w jobie z sekretami`], u);
+    }
+    for (const u of [`      - uses: actions/upload-artifact@${SHA} # v7`, `      - name: U\n        uses: actions/upload-artifact@${SHA}`]) {
+      assert.deepEqual(checkSecretJobDeps(step(u), 'f'), [], u);
+    }
+    for (const u of [`      -  uses: actions/cache@${SHA}`, `      - uses:  actions/cache@${SHA}`, `      - name: C\n        uses: actions/cache@${SHA}`]) {
+      assert.deepEqual(checkSecretJobDeps(step(u), 'f'), [`${job}akcja actions/cache poza listą dozwolonych w jobie z sekretami`], u);
+    }
+    assert.deepEqual(checkSecretJobDeps(step(`      - run: echo uses: actions/cache@${SHA}`), 'f'), []);
+    const noPmc = `${job}setup-node bez package-manager-cache: false`;
+    const pmc = '          package-manager-cache: false # powód\n';
+    assert.deepEqual(checkSecretJobDeps(swap('          node-version: 22\n', '          node-version: 22\n          cache: yarn\n'), 'f'), [`${job}setup-node z cache`]);
+    assert.deepEqual(checkSecretJobDeps(swap('          node-version: 22\n', '          node-version: 22\n          foo:\n            cache: yarn\n'), 'f'), []);
+    for (const repl of ['', '          package-manager-cache: true\n', '          x-package-manager-cache: false\n', '          package-manager-cache: false x\n',
+      '          scope: |\n            package-manager-cache: false\n', '\n          # package-manager-cache: false\n']) {
+      assert.deepEqual(checkSecretJobDeps(swap(pmc, repl), 'f'), [noPmc], repl);
+    }
+    assert.deepEqual(checkSecretJobDeps(swap(pmc, '\n          package-manager-cache:  false  \n'), 'f'), []);
+    for (const u of [`      -  uses: actions/setup-node@${SHA}`, `      - uses:  actions/setup-node@${SHA}`]) {
+      assert.deepEqual(checkSecretJobDeps(step(`${u}\n        with:\n          cache: yarn`), 'f'), [`${job}setup-node z cache`, noPmc], u);
+    }
+    assert.deepEqual(checkSecretJobDeps(step(`      - run: echo uses: actions/setup-node@${SHA}`), 'f'), []);
+    assert.deepEqual(checkSecretJobDeps('name: X\n', 'f'), ['f: brak rozpoznanych jobów']);
+  });
+
+  test('pkt 3 i AC-3: npm tylko w dokładnych poleceniach z listy, npx tylko clasp i eslint, bez continue-on-error i git/gh pobierających kod', () => {
+    for (const cmd of ['npm ci', 'npm install', 'npm i', 'npm ci # --ignore-scripts', 'npm ci --ignore-scripts=false', 'npm  ci --ignore-scripts',
+      'npm ci --ignore-scripts && npm rebuild', 'npm --foreground-scripts ci', 'npm clean-install', 'npm run lint || true', 'echo "npm test pominięty"']) {
+      assert.deepEqual(checkSecretJobDeps(swap('run: npm ci --ignore-scripts', `run: ${cmd}`), 'f'), [`${job}npm poza listą dozwolonych poleceń: run: ${cmd}`], cmd);
+    }
+    assert.deepEqual(checkSecretJobDeps(step('      - run: |\n          npm \\\n            install'), 'f'), [`${job}npm poza listą dozwolonych poleceń: npm \\`]);
+    for (const ok of ['      -  run: npm ci --ignore-scripts   ', '      - run:  npm test', '      - run: |\n          npm run quality:gate -- --changed=none\n          npm test',
+      '      # npm ci', '      - run: npmx ci', '      - run: npx eslint x', '      - run: x; npx clasp status; y']) {
+      assert.deepEqual(checkSecretJobDeps(step(ok), 'f'), [], ok);
+    }
+    for (const cmd of ['npx -y evil', 'npx evil', 'npx claspx a', 'npx clasp', 'x && npx  -p y clasp a']) {
+      assert.deepEqual(checkSecretJobDeps(step(`      - run: ${cmd}`), 'f'), [`${job}npx poza clasp i eslint: - run: ${cmd}`], cmd);
+    }
+    for (const t of ['        continue-on-error: true', '      - continue-on-error: false\n        run: echo']) {
+      assert.deepEqual(checkSecretJobDeps(swap('      - name: Lint\n', `      - name: Lint\n${t}\n`), 'f'), [`${job}continue-on-error w jobie z sekretami`], t);
+    }
+    assert.deepEqual(checkSecretJobDeps(step('      - run: echo continue-on-error: true'), 'f'), []);
+    for (const cmd of ['git checkout origin/feature', 'git fetch', 'git  switch x', 'gh run download -n x', 'gh release download', 'gh pr checkout 1', 'x; git restore .']) {
+      assert.deepEqual(checkSecretJobDeps(step(`      - run: ${cmd}`), 'f'), [`${job}polecenie git/gh pobierające kod albo artefakty: - run: ${cmd}`], cmd);
+    }
+    for (const ok of ['git rev-parse HEAD', 'gh api repos/x', 'git show x:y', 'gitx checkout', 'ghx run']) {
+      assert.deepEqual(checkSecretJobDeps(step(`      - run: ${ok}`), 'f'), [], ok);
+    }
+  });
+
+  test('pkt 4: checkout tylko z refem z listy pliku, bez repository, z persist-credentials: false (bezpośrednie dzieci with)', () => {
+    const noRef = `${job}checkout bez ref z listy (${DEPLOY_SHA}, ${TOOLING_SHA})`;
+    const noPersist = `${job}checkout bez persist-credentials: false w with`;
+    const ref = `ref: ${DEPLOY_SHA}`;
+    assert.deepEqual(checkSecretJobRefs(swap(ref, 'ref: ${{ inputs.deploy_ref }}'), 'f', DEPLOY.refs),
+      [noRef, `${job}wejście poza env i if: ref: \${{ inputs.deploy_ref }}`]);
+    for (const r of ['ref: ${{ env.DEPLOY_REF }}', 'ref: main', 'ref: ${{ steps.any.outputs.r }}', `${ref} x`, `${ref} # c`, 'ref: ${{steps.ref.outputs.deploy_sha}}', `x${ref}`, 'x: main']) {
+      assert.deepEqual(checkSecretJobRefs(swap(ref, r), 'f', DEPLOY.refs), [noRef], r);
+    }
+    assert.deepEqual(checkSecretJobRefs(swap(ref, `ref:   ${DEPLOY_SHA}  `), 'f', DEPLOY.refs), []);
+    assert.deepEqual(checkSecretJobRefs(swap(ref, 'ref: main'), 'f', ['main', TOOLING_SHA]), []);
+    assert.deepEqual(checkSecretJobRefs(swap(`          ${ref}\n          persist-credentials: false\n`,
+      `          ssh-known-hosts: |\n            ${ref}\n            persist-credentials: false\n          ref: \${{ env.DEPLOY_REF }}\n`), 'f', DEPLOY.refs), [noRef, noPersist]);
+    assert.deepEqual(checkSecretJobRefs(swap(`          ${ref}\n          persist-credentials: false\n`, `          ${ref}\n`), 'f', DEPLOY.refs), [noPersist]);
+    assert.deepEqual(checkSecretJobRefs(swap(`          ${ref}\n          persist-credentials: false\n`, `          ${ref}\n          persist-credentials: true\n`), 'f', DEPLOY.refs), [noPersist]);
+    assert.deepEqual(checkSecretJobRefs(swap(`          ${ref}\n`, `          ${ref}\n          repository: o/r\n`), 'f', DEPLOY.refs), [`${job}checkout z repository`]);
+    for (const extra of ['          note: repository: x\n', '          foo:\n            repository: o/r\n']) {
+      assert.deepEqual(checkSecretJobRefs(swap(`          ${ref}\n`, `          ${ref}\n${extra}`), 'f', DEPLOY.refs), [], extra);
+    }
+    for (const u of [`      -  uses: actions/checkout@${SHA}`, `      - uses:  actions/checkout@${SHA}`]) {
+      assert.deepEqual(checkSecretJobRefs(step(`${u}\n        with:\n          ref: x\n          persist-credentials: false`), 'f', DEPLOY.refs), [noRef], u);
+    }
+    assert.deepEqual(checkSecretJobRefs(step(`      - run: echo uses: actions/checkout@${SHA}`), 'f', DEPLOY.refs), []);
+  });
+
+  test('pkt 4: wejścia (inputs, github.event, head_ref, cały kontekst github w wyrażeniu, plik zdarzenia) tylko w env i if', () => {
+    const shown = body => [`${job}wejście poza env i if: ${body.trim().slice(0, 60)}`];
+    for (const body of [
+      '      - run: echo "$GITHUB_EVENT_PATH"', '      - run: echo github.head_ref', '      - run: echo inputs .a', '      - run: echo inputs',
+      '      - run: echo github .event', '      - run: echo github. event', '      - run: echo if: ${{ inputs.a }}', `      - run: echo ${'x'.repeat(70)} inputs.a`
+    ]) {
+      assert.deepEqual(checkSecretJobRefs(step(body), 'f', DEPLOY.refs), shown(body), body);
+    }
+    for (const [body, line] of [
+      ['      - run: |\n          echo inputs.x', 'echo inputs.x'],
+      [`      - uses: o/a@${SHA} # v1\n        with:\n          tag: \${{ github.event.release.tag_name }}`, 'tag: ${{ github.event.release.tag_name }}'],
+      [`      - uses: o/a@${SHA} # v1\n        with:\n          tag: \${{ github['event'] }}`, "tag: ${{ github['event'] }}"],
+      [`      - uses: o/a@${SHA} # v1\n        with:\n          tag: \${{ inputs['x'] }}`, "tag: ${{ inputs['x'] }}"],
+      [`      - uses: o/a@${SHA} # v1\n        with:\n          p: \${{ fromJSON(toJSON(inputs)).deploy_ref }}`, 'p: ${{ fromJSON(toJSON(inputs)).deploy_ref }}'],
+      [`      - uses: o/a@${SHA} # v1\n        with:\n          p: \${{ toJSON(github) }}`, 'p: ${{ toJSON(github) }}'],
+      [`      - uses: o/a@${SHA} # v1\n        with:\n          p: \${{ github }}`, 'p: ${{ github }}'],
+      ['      - env:\n          X: >-\n            ${{ inputs.a }}\n        run: echo', '${{ inputs.a }}'],
+      ['      - run: echo env:\n          ${{ inputs.a }}', '${{ inputs.a }}']
+    ]) {
+      assert.deepEqual(checkSecretJobRefs(step(body), 'f', DEPLOY.refs), shown(line), body);
+    }
+    for (const body of [
+      '      - if: github.event.release.prerelease == false\n        run: echo',
+      '      - env:\n\n          # komentarz\n          X: ${{ inputs.a }}\n        run: echo',
+      '      # ${{ inputs.a }}\n      - run: echo',
+      `      - uses: o/a@${SHA} # v1\n        with:\n          tag: \${{ github.event_name }}\n          r: \${{ github.ref }}\n          s: \${{ secrets.GITHUB_TOKEN }}`,
+      "      - run: echo\n        if: inputs.a == 'x'", "      -  if: inputs.a == 'x'\n        run: echo", '      -  env:\n          X: ${{ inputs.a }}\n        run: echo',
+      '      - run: echo GitHub GITHUB_REPOSITORY'
+    ]) {
+      assert.deepEqual(checkSecretJobRefs(step(body), 'f', DEPLOY.refs), [], body);
+    }
+  });
+
+  test('pkt 6: sekret tylko w krokach, kolejność kroków wokół poświadczeń, sprzątanie jako własne klucze ostatniego kroku', () => {
+    const creds = '      - name: Creds\n        env:\n          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}\n        run: npx clasp --version\n';
+    const early = GOOD.replace(creds, '').replace('      - name: Lint\n', `${creds}      - name: Lint\n`);
+    assert.deepEqual(checkSecretStepOrder(early, 'f', DEPLOY.before), [`${job}lint nie poprzedza kroku z sekretami`, `${job}testy nie poprzedza kroku z sekretami`]);
+    assert.deepEqual(checkSecretStepOrder(swap('      - name: Tests\n        run: npm test\n', ''), 'f', DEPLOY.before), [`${job}testy nie poprzedza kroku z sekretami`]);
+    const all3 = [`${job}npm ci nie poprzedza kroku z sekretami`, `${job}lint nie poprzedza kroku z sekretami`, `${job}testy nie poprzedza kroku z sekretami`];
+    for (const s of ['${{ secrets.CLASPRC_JSON }}', '${{ secrets . apps_script_id }}']) {
+      const same = GOOD.replace(creds, '').replace('      - name: Install\n        run: npm ci --ignore-scripts\n',
+        `      - name: Install\n        env:\n          C: ${s}\n        run: npm ci --ignore-scripts\n`);
+      assert.deepEqual(checkSecretStepOrder(same, 'f', DEPLOY.before), all3, s);
+    }
+    const poza = 'f: sekret Apps Script poza krokami (env albo if workflow\'u lub joba)';
+    assert.deepEqual(checkSecretStepOrder(swap('      TAG: ${{ github.event.release.tag_name }}\n', '      TAG: ${{ github.event.release.tag_name }}\n      C: ${{ secrets.CLASPRC_JSON }}\n'), 'f', DEPLOY.before), [poza]);
+    assert.deepEqual(checkSecretStepOrder(swap('permissions:\n', 'env:\n  C: ${{ secrets.APPS_SCRIPT_ID }}\npermissions:\n'), 'f', DEPLOY.before), [poza]);
+    assert.deepEqual(checkSecretStepOrder(swap('      TAG: ${{ github.event.release.tag_name }}\n', '      TAG: ${{ github.event.release.tag_name }}\n      # C: ${{ secrets.CLASPRC_JSON }}\n'), 'f', DEPLOY.before), []);
+    assert.deepEqual(checkSecretStepOrder(swap('${{ secrets.CLASPRC_JSON }}', '${{ secrets.GITHUB_TOKEN }}'), 'f', DEPLOY.before), [`${job}brak kroku z sekretami Apps Script`]);
+    assert.deepEqual(checkSecretStepOrder(swap('          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}\n', '          # ${{ secrets.CLASPRC_JSON }}\n          A: 1\n'), 'f', DEPLOY.before), [`${job}brak kroku z sekretami Apps Script`]);
+
+    const order = (pre, rm = '        if: always()\n        run: rm -f "$HOME/.clasprc.json"\n') =>
+      `jobs:\n  d:\n    name: d\n    steps:\n${pre}      - env:\n          A: \${{ secrets.APPS_SCRIPT_ID }}\n        run: echo\n      - name: R\n${rm}`;
+    const not = label => [`f: job d: ${label} nie poprzedza kroku z sekretami`];
+    const LINT = DEPLOY.before[1];
+    assert.deepEqual(checkSecretStepOrder(order('      - run: echo x run: npm ci\n'), 'f', [NPM_CI]), not('npm ci'));
+    assert.deepEqual(checkSecretStepOrder(order('      - run: echo x run: npm run lint\n'), 'f', [LINT]), not('lint'));
+    for (const pre of ['      -  run: npm ci --ignore-scripts\n', '      - run:  npm ci --ignore-scripts\n']) {
+      assert.deepEqual(checkSecretStepOrder(order(pre), 'f', [NPM_CI]), [], pre);
+    }
+    for (const pre of ['      -  run: npm run lint\n', '      - run:  npm run lint\n']) {
+      assert.deepEqual(checkSecretStepOrder(order(pre), 'f', [LINT]), [], pre);
+    }
+    assert.deepEqual(checkSecretStepOrder(order(''), 'f', SEKRETNE['apps-script-drift.yml'].before), not('npm ci'));
+    assert.deepEqual(checkSecretStepOrder(order(''), 'f', []), []);
+
+    const last = ['f: job d: ostatni krok nie usuwa poświadczeń z if: always()'];
+    for (const rm of ['        run: rm -f "$HOME/.clasprc.json"\n', '        if: always() && x\n        run: rm -f "$HOME/.clasprc.json"\n',
+      '        if: always()\n        run: echo rm -f "$HOME/.clasprc.json"\n', '        run: rm -f "$HOME/.clasprc.json" # if: always()\n',
+      '        if: always()\n        run: echo run: rm -f "$HOME/.clasprc.json"\n',
+      '        if: cancelled()\n        env:\n          if: always()\n        run: rm -f "$HOME/.clasprc.json"\n',
+      '        if: always()\n        with:\n          run: rm -f "$HOME/.clasprc.json"\n',
+      '        if: always()\n        run: rm -f "$HOME/.clasprc.json"\n      - name: After\n        run: echo\n']) {
+      assert.deepEqual(checkSecretStepOrder(order('', rm), 'f', []), last, rm);
+    }
+    for (const rm of ['        if:  always()   \n        run:  rm -f "$HOME/.clasprc.json" live/x\n', '        run: rm -f "$HOME/.clasprc.json"\n        if: always()\n']) {
+      assert.deepEqual(checkSecretStepOrder(order('', rm), 'f', []), [], rm);
+    }
+    assert.deepEqual(checkSecretStepOrder(order('').replace('      - name: R\n', '      - if: always()\n        run: rm -f "$HOME/.clasprc.json"\n'), 'f', []), []);
+  });
+
+  test('childrenOf i parentLine: bezpośrednie dzieci klucza, rodzic z pominięciem pustych linii, komentarzy i linii z samych spacji', () => {
+    const s = '      - uses: x\n        with:\n\n          # k\n          a: 1\n          b: |\n            c: 2\n          d: 3\n        env:\n          e: 4\n';
+    assert.deepEqual(childrenOf(s, 'with'), ['          a: 1', '          b: |', '          d: 3']);
+    assert.deepEqual(childrenOf(s, 'brak'), []);
+    const lines = ['a:', '  b:', '', '  # c', '    d: 1', 'e: 2'];
+    assert.equal(parentLine(['a:', '  b:', '   ', '    d: 1'], 3), '  b:');
+    assert.equal(parentLine(lines, 4), '  b:');
+    assert.equal(parentLine(lines, 1), 'a:');
+    assert.equal(parentLine(lines, 5), undefined);
+    assert.equal(parentLine(lines, 0), undefined);
   });
 });
