@@ -35,9 +35,9 @@ on:
   issue_comment:
     types: [created, edited, deleted]
 
+# Uprawnienia zapisu są na poziomie jobu (reconcile); na górze tylko odczyt.
 permissions:
   contents: read
-  issues: write
 
 # Nie anulujemy runów w locie: reconciler ma dokończyć zapis etykiety.
 concurrency:
@@ -46,6 +46,7 @@ concurrency:
 
 jobs:
   reconcile:
+    name: reconcile
     # GitHub wysyła `issue_comment` także dla pull requestów — bez tego guarda
     # `/audit-ok` napisane w PR manipulowałoby etykietami PR-a.
     #
@@ -61,6 +62,9 @@ jobs:
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read # checkout skryptów bramki
+      issues: write # etykiety audit:* i needs-triage oraz komentarz-znacznik na zgłoszeniu
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPOSITORY: ${{ github.repository }}
@@ -79,8 +83,9 @@ jobs:
       TRIAGE_REQUIRED: "P,T"
     steps:
       - name: Checkout gate script
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           sparse-checkout: |
             scripts/quality/issue-audit-gate.js
             scripts/quality/issue-audit-sides.js
@@ -88,7 +93,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -109,6 +114,8 @@ jobs:
           steps.gate.outputs.label == 'audit:pending' &&
           steps.gate.outputs.previous != '' &&
           steps.gate.outputs.previous != 'audit:pending'
+        env:
+          PREVIOUS_LABEL: ${{ steps.gate.outputs.previous }}
         run: |
           gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body \
-            "Stan audytu cofnięty z \`${{ steps.gate.outputs.previous }}\` do \`audit:pending\`: po rozstrzygnięciu zmieniła się treść issue, jej autorstwo (podpis, \`by:agent\`) albo komentarz z werdyktem (edycja lub usunięcie). Opisz w komentarzu, co się zmieniło — sama etykieta tego nie powie."
+            "Stan audytu cofnięty z \`${PREVIOUS_LABEL}\` do \`audit:pending\`: po rozstrzygnięciu zmieniła się treść issue, jej autorstwo (podpis, \`by:agent\`) albo komentarz z werdyktem (edycja lub usunięcie). Opisz w komentarzu, co się zmieniło — sama etykieta tego nie powie."

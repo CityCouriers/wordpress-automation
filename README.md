@@ -541,7 +541,9 @@ Check uruchamia się przy każdym pushu i prośbie o recenzję. Każdy komentarz
 gh pr comment <numer> --body "/reviewed przyjęta poprawka uprawnień, pominięta uwaga o sformułowaniu"
 ```
 
-Dependabot otwiera cotygodniowe PR-y dla GitHub Actions i deweloperskich zależności npm.
+Dependabot otwiera cotygodniowe PR-y dla GitHub Actions i deweloperskich zależności npm; nowa wersja czeka 7 dni od wydania (`cooldown`), a aktualizacji bezpieczeństwa to nie dotyczy.
+
+Akcje w workflow'ach (poza `apps-script-drift.yml` i `deploy-apps-script.yml`, które obejmuje kolejny etap #296) są przypięte do pełnego SHA z komentarzem wersji; checkouty mają `persist-credentials: false`, uprawnienia zapisu są nadawane na poziomie jobu z uzasadnieniem w komentarzu, a wartości z kontekstu zdarzenia trafiają do skryptów przez `env`. Wyjątki skanera zizmor (tylko `dangerous-triggers` dla `review-gate.yml` i `issue-audit.yml`) są w `.github/zizmor.yml` z uzasadnieniem; pilnuje tego `test/workflow-hardening.test.js`.
 
 ## Wdrażanie do Apps Script
 
