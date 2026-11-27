@@ -14,8 +14,12 @@ name: Apps Script drift check
 # rewizją jako danymi i nie zastępuje kontroli regularnej; bieg zaplanowany
 # go nigdy nie czyta.
 #
-# Granica zaufania: kod narzędzia i `npm ci` pochodzą wyłącznie z `main`;
-# porównywana rewizja jest czytana jako dane (`git show`), nigdy wykonywana.
+# Rozdział kodu od danych (#297): kod narzędzia i `npm ci` pochodzą wyłącznie
+# z `main`; porównywana rewizja jest czytana jako dane (`git show`), nigdy
+# wykonywana. To chroni przed pomyłką w zatwierdzonym kodzie, nie przed zmianą
+# tego pliku na gałęzi roboczej: workflow uruchomiony ręcznie z takiej gałęzi
+# dostaje te same sekrety repozytorium (ryzyko zaakceptowane przez właściciela
+# w #296, wariant A).
 #
 # Uses the same repository secrets as the deploy workflow.
 
@@ -31,31 +35,40 @@ on:
 
 permissions:
   contents: read
-  deployments: read
+  deployments: read # odczyt rekordu wdrożenia apps-script-live (#297)
+
+# Bez anulowania: przerwany bieg zostawiłby poświadczenia bez kroku sprzątania.
+concurrency:
+  group: apps-script-drift
+  cancel-in-progress: false
 
 jobs:
   drift:
+    name: drift
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # Kod narzędzia, package-lock.json i historia (tagi, przodkowie main) tylko
       # z main. Wejście compare_ref nie steruje checkoutem.
       - name: Checkout main
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
 
+      # #296 (AC-3): job z sekretami nie odtwarza cache npm (powód w
+      # deploy-apps-script.yml przy tym samym kroku).
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
+          package-manager-cache: false
 
       # clasp comes from devDependencies, pinned by package-lock.json.
+      # --ignore-scripts: prepare (hook pre-commit) nie jest tu potrzebny.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Żywy projekt trafia do czystego katalogu live/: pliki z main nie mogą
       # udawać plików żywego projektu.
@@ -85,7 +98,7 @@ jobs:
 
       - name: Upload drift patch
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apps-script-drift
           path: apps-script-drift.patch
