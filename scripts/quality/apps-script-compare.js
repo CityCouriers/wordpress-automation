@@ -60,8 +60,14 @@ function report(text) {
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + '\n');
 }
 
+/**
+ * Limit wyniku gita (stdout) w bajtach. Domyślny maxBuffer Node to 1 MiB: większy diff kończył się wyjątkiem ENOBUFS, a większy blob z `git show`
+ * obciętym stdout i statusem null (fałszywy drift, #318). Ta sama wartość co w apps-script-drift.js.
+ */
+const GIT_MAX_BUFFER = 256 * 1024 * 1024;
+
 function git(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 /** Wyjście gita z opcją -z: wpisy rozdzielone NUL, bez pustych. */
@@ -121,8 +127,9 @@ function normalizeTrailingNewline(cwd) {
 function normalizeIndexTrailingNewline(cwd) {
   const tracked = splitNul(git(cwd, ['ls-files', '-z', '--', ...sourcePathspec(cwd)]));
   for (const f of tracked) {
-    const shown = spawnSync('git', ['show', ':' + f], { cwd, encoding: 'utf8' });
-    if (shown.status !== 0) continue;
+    const shown = spawnSync('git', ['show', ':' + f], { cwd, encoding: 'utf8', maxBuffer: GIT_MAX_BUFFER });
+    // Samo `status` nie wystarcza: przy przekroczeniu maxBuffer spawnSync bywa kończony ze statusem 0, błędem ENOBUFS i obciętym stdout (Linux).
+    if (shown.error || shown.status !== 0) continue;
     const indexed = shown.stdout;
     if (!indexed.length || indexed.endsWith('\n')) continue;
     const p = path.join(cwd, f);
