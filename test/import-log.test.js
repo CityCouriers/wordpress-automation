@@ -7,7 +7,7 @@
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadProject, plain } = require('./helpers/gas');
+const { loadProject, plain, freezeClock } = require('./helpers/gas');
 
 const GSC_SHEET = 'Konfiguracja GSC';
 const GA4_SHEET = 'Konfiguracja GA4';
@@ -30,7 +30,9 @@ const history = (n, rows, source = 'GSC', type = 'trigger', days = 1) =>
 
 describe('IMPORT LOG: zapis historii', () => {
   test('udany run dopisuje wiersz z profilem, wynikiem i szczegółami; arkusz powstaje sam', () => {
-    const gas = loadProject({ sheets: baseSheets() });
+    // Zamrożony zegar: kolumna `Czas [s]` liczy się z `Date.now()`, więc bez
+    // niego wolny przebieg (obciążona maszyna) dawał 1 albo 2 zamiast 0 (#329).
+    const gas = freezeClock(loadProject({ sheets: baseSheets() }), 2026, 10, 23);
     gas.recordImportRun_('GSC', true, () => ({ rows: 42, days: 1, detail: '42 wierszy' }));
     const log = gas.$sheet(LOG);
     // Nowa zakładka dostaje od razu pełny nagłówek, z `Zakres danych` na końcu (#180).
